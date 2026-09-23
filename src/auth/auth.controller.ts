@@ -1,10 +1,13 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import { Public } from './public.decorator';
 import { RefreshSessionBody } from './dto/refresh-session.dto';
 import { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
 import { SignOutBody } from './dto/sign-out.dto';
 import { VerifySignInCodeBody } from './dto/verify-sign-in-code.dto';
 
+// Public: every route here is how a client gets a token in the first place.
+@Public()
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}

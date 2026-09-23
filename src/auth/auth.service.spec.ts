@@ -94,6 +94,7 @@ describe('AuthService', () => {
       | 'rotate'
       | 'deleteById'
       | 'deleteByTokenHash'
+      | 'findLiveById'
     >
   >;
   let warn: jest.Mock;
@@ -121,6 +122,7 @@ describe('AuthService', () => {
       rotate: jest.fn().mockResolvedValue(session),
       deleteById: jest.fn(),
       deleteByTokenHash: jest.fn(),
+      findLiveById: jest.fn(),
     };
     warn = jest.fn();
     sendSignInCode = jest

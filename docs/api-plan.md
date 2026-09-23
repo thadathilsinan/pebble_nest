@@ -99,7 +99,7 @@ Screens: sign-in, code entry, first run, You.
 | POST | `/auth/apple` | `{ identityToken, authorizationCode, fullName? }` | `Session` | Apple sends the name only on first sign-in, so store it then. Keep the Apple refresh token; account deletion revokes it. |
 | POST | `/auth/refresh` | `{ refreshToken }` | `Session` (200) | **Built.** Rotates the token and slides the session's expiry to 60 days from now. Presenting a token the session has already rotated away from revokes the whole device session, except for a **30-second grace window**: the token retired most recently rotates again, so a retry after a lost response doesn't sign the device out. Unknown, expired, revoked or reused tokens all get `401 TOKEN_INVALID`. `isNewAccount` is always `false`. |
 | POST | `/auth/sign-out` | `{ refreshToken }` | 204 | **Built.** ACC-05. Ends the session the token is current for. Idempotent: an unknown, expired or already-rotated token is also 204. |
-| GET | `/me` | — | `Profile` | |
+| GET | `/me` | — | `Profile` | **Built.** Reads the caller's session, because `signInMethod` belongs to the device. So a signed-out, revoked or expired session gets `401 TOKEN_INVALID` here right away, even though the guard still accepts its access token. |
 | PATCH | `/me` | `{ version, name?, weekStart?, timeFormat?, timeZone? }` | `Profile` | The client sends `timeZone` silently on every app open. |
 | DELETE | `/me` | — | 204 | ACC-06. Immediate hard delete of all data, plus Sign in with Apple token revocation. The client shows the confirmation. |
 
@@ -120,6 +120,12 @@ Profile = {
 
 - **Auth model:** a short-lived access JWT (about 15 minutes) sent as `Bearer`,
   plus a long-lived, rotating, opaque refresh token for each device.
+- **Every route outside `/auth/*` and `/health/*` needs the access token.** A
+  missing, malformed, expired or forged one gets `401 TOKEN_INVALID`. The client
+  handles any 401 from a protected route by refreshing once and retrying, and
+  signs in again if the refresh fails too. The guard does not check the session,
+  so after sign-out an access token keeps working for up to 15 minutes on routes
+  that don't read the session themselves.
 - **`isNewAccount: true`** tells the client to show the first-run screen, which
   then calls `PATCH /me { weekStart }`. **No name is asked for.** Google and Apple
   fill it in when they can.
@@ -351,6 +357,7 @@ request turns out to be slow.
 | 13 | The UI is the master spec. The SRS applies only where this log says so (#4). |
 | 14 | A general-list task that repeats on its own uses the REC-06 rule: carried over if its next occurrence is more than a day away, otherwise recorded as missed. |
 | 15 | Refresh-token reuse is detected against every token a session has retired (`session_refresh_tokens`), not only the last one. The token retired most recently stays usable for 30 seconds, for retries. Session expiry slides on each refresh. |
+| 16 | The auth guard is stateless: it checks the access token's signature and expiry, not the session. A revoked session's access token works for up to 15 minutes, except on endpoints that read the session (`GET /me`). Every bad access token is `401 TOKEN_INVALID`. There is no separate expired code. |
 
 ## 11. Error codes to add
 
@@ -362,7 +369,7 @@ Append these to `src/http/error-code.ts`:
 | `CODE_INVALID` | 400 | Wrong sign-in code. `error.meta.attemptsLeft`. **Added.** |
 | `CODE_EXPIRED` | 410 | The sign-in code is more than 10 minutes old, already used, or was never sent. **Added.** |
 | `CODE_ATTEMPTS_EXHAUSTED` | 429 | 5 wrong attempts. The user must request a new code. **Added.** |
-| `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired, revoked or reused. **Added** (refresh). |
+| `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired, revoked or reused. **Added** (refresh, auth guard). |
 | `BLOCK_TOO_SHORT` / `BLOCK_TOO_LONG` | 422 | BLK-05 |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task, or `recurrence` on a task in a block. |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. |
@@ -389,8 +396,5 @@ These decisions add behaviour the UI doesn't have yet:
 - Google OAuth client IDs for iOS, Android and web.
 - Apple: Service ID / bundle ID, Team ID, and a Key ID with its private key. These
   are needed for sign-in, the code exchange and token revocation.
-- Authorization in the backend skeleton: a global auth guard, a `@Public()`
-  decorator for `/auth/*` and `/health/*`, and the caller id passed to services as
-  an argument (`docs/adding-a-feature.md` §12).
 - The day-end job runner, one run per user's local midnight, safe with several
   instances running at once.

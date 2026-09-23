@@ -52,11 +52,9 @@ in `docs/database-decisions.md`**: truncate the tables a spec touches before eac
 test, and run jest `--runInBand`. `src/database/testing.ts` opens the app's own
 pool for a repository spec. §9 has the rule.
 
-**4. Authorization.** There are no guards, no `@Public()` decorator and no token
-verification anywhere in this skeleton. **Every route added today is reachable by
-anyone who can reach the port.** That is fine for the first local slice and is not
-fine for the first deployment; it is out of scope here, and §12 says so rather
-than letting this document imply a protection that does not exist.
+**4. Authorization.** Settled by the guard + `GET /me` slice: a global
+`AuthGuard` requires an access token on every route that is not `@Public()`, and
+the caller reaches services as an argument. §3.6 has the rules.
 
 ---
 
@@ -220,6 +218,9 @@ It does not catch exceptions. `AllExceptionsFilter` renders every throwable as o
 `ApiFailure`, and a `try`/`catch` in a handler is how a feature acquires a second
 error shape.
 
+On a protected route it also takes the caller, `@CurrentCaller() caller: Caller`,
+and passes it to the service (§3.6).
+
 ### 3.3 The service
 
 Business rules, orchestration across repositories, and the transaction boundary
@@ -299,6 +300,40 @@ mapper.
 `version` **is** exposed. Optimistic concurrency pushes it onto the client by
 design (decision 7), so it is part of the contract rather than a leak.
 
+### 3.6 Authorization
+
+`AuthGuard` (`src/auth/auth.guard.ts`) is registered as `APP_GUARD`, so **every
+route needs a valid access token by default**. A route that must be reachable
+without one is marked `@Public()` on the controller or the handler. Today that is
+`AuthController` (it is how a client gets a token) and `HealthController`.
+Forgetting `@Public()` fails closed with a 401. Forgetting the guard is not
+possible.
+
+The guard reads `Authorization: Bearer <jwt>` and verifies it through
+`AccessTokensService.verify`: HS256 only, `exp` required, and `sub` and `sid`
+present. Anything else, including no header, is `401 TOKEN_INVALID`. On success
+it attaches a `Caller` (`{ userId, sessionId }`) to the request.
+
+**The guard is stateless.** It does not look the session up, so a session that
+was signed out or revoked keeps passing the guard until its access token
+expires (`ACCESS_TOKEN_TTL_SECONDS`, 15 minutes by default). An endpoint that
+must refuse a dead session at once reads the session itself, as `GET /me` does.
+
+The caller travels as an argument:
+
+```ts
+@Get()
+list(@CurrentCaller() caller: Caller, @Query() query: ListNotesQuery) {
+  return this.notes.list(caller, query);
+}
+```
+
+The service scopes every read and write by `caller.userId`. It never trusts a user
+id from the body, the path or the query. A row that belongs to someone else is a
+404, not a 403, so the API does not reveal that the id exists.
+
+`@CurrentCaller()` on a `@Public()` route throws, since there is no caller to read.
+
 ---
 
 ## 4. The request contract
@@ -330,6 +365,11 @@ DTO.**
 
 A global pipe applies to every parameter, so a param-level pipe instance does not
 rescue a bare parameter — the global one throws first. Write the DTO.
+
+The one exemption is a custom parameter decorator (`metadata.type === 'custom'`),
+such as `@CurrentCaller()`. Its value comes from the server, not the client, so
+the pipe passes it through untouched. The exemption covers only that kind:
+`@Body()`, `@Query()` and `@Param()` still fail closed.
 
 ### 4.2 Bodies are strict; queries coerce
 
@@ -1159,22 +1199,12 @@ catch.
 
 Listed so their absence is not read as a position.
 
-**Authorization.** There is no guard, no `@Public()` decorator, no token
-verification and no notion of a caller. Every endpoint written against this
-document is open to anyone who can reach the port, and `/api/v1/notes` as
-specified above would let any caller edit any note. The skeleton's own decision
-about this is recorded only as the statement in `docs/database-decisions.md`
-decision 1 that authorization lives in the application rather than in the
-database. **The first project that deploys owes this document a section**, and it
-will change §3.2 and §3.3 — a caller identity has to reach the service as an
-argument, because the service may not see `Request`.
-
-It also unblocks one thing that is currently degraded rather than merely absent:
-until a principal exists there is nothing to scope an idempotency key to, so a
-replay cannot safely return the original response and answers `409` instead (§6.3,
-and `docs/schema-conventions.md` §9). Adding authentication is what lets that
-become a real replay — and the owner column and the scoped unique index have to
-land in the same migration.
+**Idempotent replay.** Authorization now exists (§3.6), so an idempotency key can
+be scoped to its owner and a replay can return the original response instead of
+`409` (§6.3, and `docs/schema-conventions.md` §9). No feature has built that yet,
+and the `notes` example above still shows the unscoped form. The first create
+endpoint with an owner column builds it, and the owner column and the scoped
+unique index have to land in the same migration.
 
 **Rate limiting.** `TOO_MANY_REQUESTS` is in `ErrorCode` and nothing can produce
 it.

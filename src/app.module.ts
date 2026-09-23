@@ -8,6 +8,7 @@ import { AllExceptionsFilter } from './http/all-exceptions.filter';
 import { ResponseEnvelopeInterceptor } from './http/response.interceptor';
 import { RequestTimeoutInterceptor } from './http/timeout.interceptor';
 import { LoggingModule } from './logging/logging.module';
+import { MeModule } from './me/me.module';
 import { ZodValidationPipe } from './validation/validation.pipe';
 
 @Module({
@@ -25,6 +26,7 @@ import { ZodValidationPipe } from './validation/validation.pipe';
     DatabaseModule,
     HealthModule,
     AuthModule,
+    MeModule,
   ],
   providers: [
     // Registered here rather than in `main.ts` so tests built with

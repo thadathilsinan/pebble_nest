@@ -1,7 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
+import { JsonWebTokenError, JwtService } from '@nestjs/jwt';
 import { ENV } from '../config/config.module';
 import type { Env } from '../config/env.schema';
+import type { Caller } from './caller';
 
 /** What an access token carries beyond `sub` (the user id). */
 export interface AccessTokenClaims {
@@ -35,5 +36,34 @@ export class AccessTokensService {
     );
 
     return { token, expiresAt: new Date(exp * 1000) };
+  }
+
+  /**
+   * The caller an access token proves, or `null` if it proves nothing: a bad
+   * signature, an `alg` other than HS256 (pinned in `AuthModule`), an expired
+   * or missing `exp`, or claims that are not the ones `issue` writes.
+   *
+   * Only the library's own token errors mean "invalid". Anything else is a
+   * fault here and propagates as a 500 rather than passing as a bad token.
+   */
+  async verify(token: string): Promise<Caller | null> {
+    let claims: Record<string, unknown>;
+    try {
+      claims = await this.jwt.verifyAsync<Record<string, unknown>>(token);
+    } catch (error: unknown) {
+      if (error instanceof JsonWebTokenError) return null;
+      throw error;
+    }
+
+    const { sub, sid, exp } = claims;
+    if (
+      typeof sub !== 'string' ||
+      typeof sid !== 'string' ||
+      typeof exp !== 'number'
+    ) {
+      return null;
+    }
+
+    return { userId: sub, sessionId: sid };
   }
 }

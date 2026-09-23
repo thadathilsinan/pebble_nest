@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
 import { Pool } from 'pg';
+import { Public } from '../auth/public.decorator';
 import { POOL } from '../database/database.module';
 import type { ErrorCode } from '../http/error-code';
 
@@ -47,6 +48,7 @@ export const HEALTH_ROUTES = [`${HEALTH_PATH}/live`, `${HEALTH_PATH}/ready`];
  * and the orchestrator's URL that mounting them outside the API exists to
  * prevent.
  */
+@Public()
 @Controller({ path: HEALTH_PATH, version: VERSION_NEUTRAL })
 export class HealthController {
   constructor(

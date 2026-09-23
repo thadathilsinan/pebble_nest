@@ -161,6 +161,20 @@ export class SessionsRepository {
     return row;
   }
 
+  /**
+   * A session that has not expired, judged on the database's clock, or `null`.
+   * Not locked: for reads that only need to know the session still stands.
+   */
+  async findLiveById(ex: Executor, id: string): Promise<SessionRow | null> {
+    const [row] = await ex
+      .select()
+      .from(sessions)
+      .where(and(eq(sessions.id, id), sql`${sessions.expiresAt} > now()`))
+      .limit(1);
+
+    return row ?? null;
+  }
+
   /** Ends a session. Its retired tokens go with it (cascade). */
   async deleteById(ex: Executor, id: string): Promise<void> {
     await ex.delete(sessions).where(eq(sessions.id, id));
