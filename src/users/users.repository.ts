@@ -45,4 +45,14 @@ export class UsersRepository {
 
     return { row: existing, created: false };
   }
+
+  async findById(ex: Executor, id: string): Promise<UserRow | null> {
+    const [row] = await ex
+      .select()
+      .from(users)
+      .where(eq(users.id, id))
+      .limit(1);
+
+    return row ?? null;
+  }
 }

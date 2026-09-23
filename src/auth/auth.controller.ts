@@ -1,6 +1,8 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import { RefreshSessionBody } from './dto/refresh-session.dto';
 import { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
+import { SignOutBody } from './dto/sign-out.dto';
 import { VerifySignInCodeBody } from './dto/verify-sign-in-code.dto';
 
 @Controller('auth')
@@ -19,5 +21,18 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   verifyCode(@Body() body: VerifySignInCodeBody) {
     return this.auth.verifyCode(body);
+  }
+
+  // 200 for the same reason as verify: a new session state, not a resource.
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  refresh(@Body() body: RefreshSessionBody) {
+    return this.auth.refresh(body);
+  }
+
+  @Post('sign-out')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async signOut(@Body() body: SignOutBody): Promise<void> {
+    await this.auth.signOut(body);
   }
 }

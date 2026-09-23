@@ -167,9 +167,9 @@ export type EmailSignInCodeRow = typeof emailSignInCodes.$inferSelect;
  * current device's.
  *
  * The refresh token is stored as its SHA-256 only — a leaked table must not be
- * a set of live sessions. No `version`: nothing edits a session through a
- * read-modify-write yet. Rotation (`/auth/refresh`) will be a conditional
- * update on the hash, which is its own optimistic check.
+ * a set of live sessions. No `version`: rotation (`/auth/refresh`) runs under
+ * `SELECT … FOR UPDATE` on the session row, not a read-modify-write from a
+ * client. `expires_at` slides forward on each rotation.
  */
 export const sessions = pgTable(
   'sessions',
@@ -210,3 +210,51 @@ export const sessions = pgTable(
 );
 
 export type SessionRow = typeof sessions.$inferSelect;
+
+/**
+ * Every refresh token a session has already rotated away from, kept so that
+ * presenting one again is recognised as reuse — the sign that a token was
+ * copied — and revokes the whole session, however many rotations ago it was
+ * retired. Only hashes, like `sessions`.
+ *
+ * `retired_at` defaults to `clock_timestamp()` rather than `now()`: a refresh
+ * that queued behind another on the session's lock started its transaction
+ * first, so `now()` would stamp it earlier than the rotation it followed, and
+ * "the most recently retired token" (the one the retry grace window accepts)
+ * would come out wrong.
+ *
+ * No `updated_at`, `version` or `deleted_at`: rows are only ever inserted, and
+ * go when their session does.
+ */
+export const sessionRefreshTokens = pgTable(
+  'session_refresh_tokens',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    sessionId: uuid('session_id').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    retiredAt: timestamp('retired_at', { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (table) => [
+    // Cascade: sign-out, reuse revocation and DELETE /me all remove the
+    // session, and its history means nothing without it.
+    foreignKey({
+      name: 'fk_session_refresh_tokens_session_id',
+      columns: [table.sessionId],
+      foreignColumns: [sessions.id],
+    }).onDelete('cascade'),
+    // Refresh looks a presented token up here when it is not the current one.
+    uniqueIndex('uq_session_refresh_tokens_token_hash').on(table.tokenHash),
+    // schema-conventions §6: the foreign key column, for the cascade's scan,
+    // and for finding a session's most recently retired token.
+    index('idx_session_refresh_tokens_session_id_retired_at').on(
+      table.sessionId,
+      table.retiredAt,
+    ),
+  ],
+);
+
+export type SessionRefreshTokenRow = typeof sessionRefreshTokens.$inferSelect;

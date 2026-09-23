@@ -5,7 +5,9 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  UnauthorizedException,
 } from '@nestjs/common';
+import { PinoLogger } from 'nestjs-pino';
 import { ENV } from '../config/config.module';
 import type { Env } from '../config/env.schema';
 import { DB, type Db } from '../database/database.module';
@@ -14,13 +16,16 @@ import type { ErrorCode } from '../http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
 import { AccessTokensService } from './access-tokens.service';
+import type { RefreshSessionBody } from './dto/refresh-session.dto';
 import type { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
+import type { SignOutBody } from './dto/sign-out.dto';
 import type { VerifySignInCodeBody } from './dto/verify-sign-in-code.dto';
 import { MAILER, type Mailer } from './mailer/mailer';
 import { SessionsRepository } from './sessions.repository';
 import {
   generateSignInCode,
   hashesMatch,
+  hashRefreshToken,
   hashSignInCode,
   newRefreshToken,
 } from './secrets';
@@ -44,6 +49,14 @@ const SEND_LIMITS: SendLimits = {
   windowSeconds: 60 * 60,
   maxSendsPerWindow: 5,
 };
+
+/**
+ * How long after a rotation the token it retired still works, once. A refresh
+ * whose response was lost on a bad connection is retried with the old token;
+ * inside this window that rotates again instead of being treated as reuse and
+ * signing the device out. Only the most recently retired token qualifies.
+ */
+const REFRESH_GRACE_SECONDS = 30;
 
 /** `Session` in `docs/api-plan.md` §2. */
 export interface SessionResponse {
@@ -72,6 +85,21 @@ type VerifyOutcome =
       refreshToken: string;
     };
 
+/**
+ * What the refresh transaction decided. Returned rather than thrown for the
+ * same reason as `VerifyOutcome`: revoking a reused token's session has to
+ * commit even though the request fails.
+ */
+type RefreshOutcome =
+  | { outcome: 'invalid' }
+  | { outcome: 'reused'; sessionId: string }
+  | {
+      outcome: 'rotated';
+      user: UserRow;
+      session: SessionRow;
+      refreshToken: string;
+    };
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -82,7 +110,10 @@ export class AuthService {
     @Inject(MAILER) private readonly mailer: Mailer,
     @Inject(DB) private readonly db: Db,
     @Inject(ENV) private readonly env: Env,
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(AuthService.name);
+  }
 
   /**
    * Sends a new code, replacing any earlier one. Answers the same whether or
@@ -191,20 +222,122 @@ export class AuthService {
           message: 'That code is not right.',
           meta: { attemptsLeft: result.attemptsLeft },
         });
-      case 'signedIn': {
-        const access = await this.accessTokens.issue(
-          result.user.id,
-          result.session.id,
+      case 'signedIn':
+        return this.sessionResponse(result, result.created);
+    }
+  }
+
+  /**
+   * Swaps a refresh token for a new one and a new access token, sliding the
+   * session's expiry forward.
+   *
+   * A token the session has already rotated away from means it was copied,
+   * so presenting one ends the session for whoever holds either copy — except
+   * the one retired last, inside `REFRESH_GRACE_SECONDS`, which is a retry.
+   */
+  async refresh({
+    refreshToken,
+  }: RefreshSessionBody): Promise<SessionResponse> {
+    const presented = hashRefreshToken(refreshToken);
+
+    const result = await this.db.transaction(
+      async (tx): Promise<RefreshOutcome> => {
+        const session = await this.sessions.lockByTokenHash(tx, presented);
+
+        if (session === null) return { outcome: 'invalid' };
+        if (session.expired) {
+          await this.sessions.deleteById(tx, session.id);
+          return { outcome: 'invalid' };
+        }
+
+        if (session.refreshTokenHash !== presented) {
+          const retired = await this.sessions.findRetiredToken(
+            tx,
+            session.id,
+            presented,
+            REFRESH_GRACE_SECONDS,
+          );
+
+          // Unreachable while the lock holds — the lookup found this session
+          // by the token — but refused rather than rotated if it ever is.
+          if (retired === null) return { outcome: 'invalid' };
+          if (!retired.inGrace) {
+            await this.sessions.deleteById(tx, session.id);
+            return { outcome: 'reused', sessionId: session.id };
+          }
+        }
+
+        const user = await this.users.findById(tx, session.userId);
+        // The session cascades with its user, so the lock proves the user.
+        if (user === null) throw new Error('locked session has no user');
+
+        const refresh = newRefreshToken();
+        const rotated = await this.sessions.rotate(
+          tx,
+          session,
+          refresh.hash,
+          this.env.REFRESH_TOKEN_TTL_DAYS,
         );
 
         return {
-          accessToken: access.token,
-          accessTokenExpiresAt: access.expiresAt.toISOString(),
-          refreshToken: result.refreshToken,
-          isNewAccount: result.created,
-          profile: toProfile(result.user, result.session.signInMethod),
+          outcome: 'rotated',
+          user,
+          session: rotated,
+          refreshToken: refresh.token,
         };
-      }
+      },
+    );
+
+    switch (result.outcome) {
+      case 'reused':
+        this.logger.warn(
+          { sessionId: result.sessionId },
+          'retired refresh token reused; session revoked',
+        );
+        throw this.tokenInvalid();
+      case 'invalid':
+        throw this.tokenInvalid();
+      case 'rotated':
+        return this.sessionResponse(result, false);
     }
+  }
+
+  /**
+   * Ends the session the token is current for (ACC-05). Idempotent: an
+   * unknown, expired or retired token is not an error, since the device is
+   * signed out either way.
+   */
+  async signOut({ refreshToken }: SignOutBody): Promise<void> {
+    await this.sessions.deleteByTokenHash(
+      this.db,
+      hashRefreshToken(refreshToken),
+    );
+  }
+
+  private tokenInvalid(): UnauthorizedException {
+    return new UnauthorizedException({
+      code: 'TOKEN_INVALID' satisfies ErrorCode,
+      message: 'This session has ended. Sign in again.',
+    });
+  }
+
+  /** The `Session` for a freshly issued refresh token, with its access token. */
+  private async sessionResponse(
+    {
+      user,
+      session,
+      refreshToken,
+    }: { user: UserRow; session: SessionRow; refreshToken: string },
+    isNewAccount: boolean,
+  ): Promise<SessionResponse> {
+    const access = await this.accessTokens.issue(user.id, session.id);
+
+    return {
+      accessToken: access.token,
+      accessTokenExpiresAt: access.expiresAt.toISOString(),
+      refreshToken,
+      isNewAccount,
+      profile: toProfile(user, session.signInMethod),
+    };
   }
 }

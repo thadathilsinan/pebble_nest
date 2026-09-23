@@ -1,4 +1,5 @@
 import { HttpException } from '@nestjs/common';
+import type { PinoLogger } from 'nestjs-pino';
 import type { Env } from '../config/env.schema';
 import type { Db } from '../database/database.module';
 import type { SessionRow, UserRow } from '../database/schema';
@@ -6,8 +7,8 @@ import type { UsersRepository } from '../users/users.repository';
 import type { AccessTokensService } from './access-tokens.service';
 import { AuthService } from './auth.service';
 import type { Mailer } from './mailer/mailer';
-import { hashSignInCode } from './secrets';
-import type { SessionsRepository } from './sessions.repository';
+import { hashRefreshToken, hashSignInCode } from './secrets';
+import type { LockedSession, SessionsRepository } from './sessions.repository';
 import type {
   LockedCode,
   SignInCodesRepository,
@@ -34,6 +35,20 @@ const session = {
   userId: user.id,
   signInMethod: 'email',
 } as SessionRow;
+
+const REFRESH_TOKEN = 'r'.repeat(43);
+
+function lockedSession(overrides: Partial<LockedSession> = {}): LockedSession {
+  return {
+    ...session,
+    refreshTokenHash: hashRefreshToken(REFRESH_TOKEN),
+    expiresAt: new Date(),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    expired: false,
+    ...overrides,
+  };
+}
 
 function storedCode(overrides: Partial<LockedCode> = {}): LockedCode {
   return {
@@ -67,8 +82,21 @@ describe('AuthService', () => {
       'issue' | 'lockByEmail' | 'recordFailedAttempt' | 'consume'
     >
   >;
-  let users: jest.Mocked<Pick<UsersRepository, 'findOrCreateByEmail'>>;
-  let sessions: jest.Mocked<Pick<SessionsRepository, 'create'>>;
+  let users: jest.Mocked<
+    Pick<UsersRepository, 'findOrCreateByEmail' | 'findById'>
+  >;
+  let sessions: jest.Mocked<
+    Pick<
+      SessionsRepository,
+      | 'create'
+      | 'lockByTokenHash'
+      | 'findRetiredToken'
+      | 'rotate'
+      | 'deleteById'
+      | 'deleteByTokenHash'
+    >
+  >;
+  let warn: jest.Mock;
   let mailer: Mailer;
   let sendSignInCode: jest.Mock<Promise<void>, [string, string]>;
   let service: AuthService;
@@ -84,8 +112,17 @@ describe('AuthService', () => {
       findOrCreateByEmail: jest
         .fn()
         .mockResolvedValue({ row: user, created: false }),
+      findById: jest.fn().mockResolvedValue(user),
     };
-    sessions = { create: jest.fn().mockResolvedValue(session) };
+    sessions = {
+      create: jest.fn().mockResolvedValue(session),
+      lockByTokenHash: jest.fn(),
+      findRetiredToken: jest.fn(),
+      rotate: jest.fn().mockResolvedValue(session),
+      deleteById: jest.fn(),
+      deleteByTokenHash: jest.fn(),
+    };
+    warn = jest.fn();
     sendSignInCode = jest
       .fn<Promise<void>, [string, string]>()
       .mockResolvedValue(undefined);
@@ -109,6 +146,7 @@ describe('AuthService', () => {
       mailer,
       db,
       { SIGN_IN_CODE_SECRET: SECRET, REFRESH_TOKEN_TTL_DAYS: 60 } as Env,
+      { setContext: jest.fn(), warn } as unknown as PinoLogger,
     );
   });
 
@@ -223,6 +261,97 @@ describe('AuthService', () => {
       await expect(
         service.verifyCode({ email: EMAIL, code: CODE }),
       ).resolves.toMatchObject({ isNewAccount: true });
+    });
+  });
+
+  describe('refresh', () => {
+    const OLD_TOKEN = 'o'.repeat(43);
+
+    it('answers TOKEN_INVALID for a token no session knows', async () => {
+      sessions.lockByTokenHash.mockResolvedValue(null);
+
+      await expect(
+        failure(service.refresh({ refreshToken: REFRESH_TOKEN })),
+      ).resolves.toMatchObject({ status: 401, code: 'TOKEN_INVALID' });
+    });
+
+    it('answers TOKEN_INVALID for an expired session, deleting it', async () => {
+      sessions.lockByTokenHash.mockResolvedValue(
+        lockedSession({ expired: true }),
+      );
+
+      await expect(
+        failure(service.refresh({ refreshToken: REFRESH_TOKEN })),
+      ).resolves.toMatchObject({ status: 401, code: 'TOKEN_INVALID' });
+      expect(sessions.deleteById).toHaveBeenCalledWith({}, 'session-1');
+      expect(sessions.rotate).not.toHaveBeenCalled();
+    });
+
+    it('rotates the current token, sliding the expiry', async () => {
+      const locked = lockedSession();
+      sessions.lockByTokenHash.mockResolvedValue(locked);
+
+      const result = await service.refresh({ refreshToken: REFRESH_TOKEN });
+
+      expect(sessions.lockByTokenHash).toHaveBeenCalledWith(
+        {},
+        hashRefreshToken(REFRESH_TOKEN),
+      );
+      const [, rotated, newHash, ttlDays] = sessions.rotate.mock.calls[0]!;
+      expect(rotated).toBe(locked);
+      expect(ttlDays).toBe(60);
+      expect(newHash).toBe(hashRefreshToken(result.refreshToken));
+      expect(result.refreshToken).not.toBe(REFRESH_TOKEN);
+      expect(result).toMatchObject({
+        accessToken: 'jwt',
+        isNewAccount: false,
+        profile: { id: user.id, signInMethod: 'email' },
+      });
+      expect(sessions.findRetiredToken).not.toHaveBeenCalled();
+    });
+
+    it('rotates again for the last retired token inside the grace window', async () => {
+      const locked = lockedSession();
+      sessions.lockByTokenHash.mockResolvedValue(locked);
+      sessions.findRetiredToken.mockResolvedValue({ inGrace: true });
+
+      await service.refresh({ refreshToken: OLD_TOKEN });
+
+      expect(sessions.findRetiredToken).toHaveBeenCalledWith(
+        {},
+        'session-1',
+        hashRefreshToken(OLD_TOKEN),
+        30,
+      );
+      // What retires is the session's current token, not the presented one.
+      expect(sessions.rotate.mock.calls[0]![1]).toBe(locked);
+      expect(sessions.deleteById).not.toHaveBeenCalled();
+    });
+
+    it('revokes the session when a retired token is reused', async () => {
+      sessions.lockByTokenHash.mockResolvedValue(lockedSession());
+      sessions.findRetiredToken.mockResolvedValue({ inGrace: false });
+
+      await expect(
+        failure(service.refresh({ refreshToken: OLD_TOKEN })),
+      ).resolves.toMatchObject({ status: 401, code: 'TOKEN_INVALID' });
+      expect(sessions.deleteById).toHaveBeenCalledWith({}, 'session-1');
+      expect(sessions.rotate).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        { sessionId: 'session-1' },
+        expect.any(String),
+      );
+    });
+  });
+
+  describe('signOut', () => {
+    it('deletes the session the token is current for', async () => {
+      await service.signOut({ refreshToken: REFRESH_TOKEN });
+
+      expect(sessions.deleteByTokenHash).toHaveBeenCalledWith(
+        expect.anything(),
+        hashRefreshToken(REFRESH_TOKEN),
+      );
     });
   });
 });

@@ -97,8 +97,8 @@ Screens: sign-in, code entry, first run, You.
 | POST | `/auth/email/verify` | `{ email, code }` | `Session` (200) | **Built.** Checked in this order: no code on file, or expired, or already used → `410 CODE_EXPIRED`; 5 wrong attempts already → `429 CODE_ATTEMPTS_EXHAUSTED`, even for the right code; wrong code → `400 CODE_INVALID` with `meta.attemptsLeft` (0 on the fifth miss). A code that isn't six digits is `400 VALIDATION_FAILED` and doesn't use up an attempt. |
 | POST | `/auth/google` | `{ idToken }` | `Session` | |
 | POST | `/auth/apple` | `{ identityToken, authorizationCode, fullName? }` | `Session` | Apple sends the name only on first sign-in, so store it then. Keep the Apple refresh token; account deletion revokes it. |
-| POST | `/auth/refresh` | `{ refreshToken }` | `Session` | Rotates the token. Presenting an already-used refresh token revokes that whole device session. |
-| POST | `/auth/sign-out` | `{ refreshToken }` | 204 | ACC-05 |
+| POST | `/auth/refresh` | `{ refreshToken }` | `Session` (200) | **Built.** Rotates the token and slides the session's expiry to 60 days from now. Presenting a token the session has already rotated away from revokes the whole device session, except for a **30-second grace window**: the token retired most recently rotates again, so a retry after a lost response doesn't sign the device out. Unknown, expired, revoked or reused tokens all get `401 TOKEN_INVALID`. `isNewAccount` is always `false`. |
+| POST | `/auth/sign-out` | `{ refreshToken }` | 204 | **Built.** ACC-05. Ends the session the token is current for. Idempotent: an unknown, expired or already-rotated token is also 204. |
 | GET | `/me` | — | `Profile` | |
 | PATCH | `/me` | `{ version, name?, weekStart?, timeFormat?, timeZone? }` | `Profile` | The client sends `timeZone` silently on every app open. |
 | DELETE | `/me` | — | 204 | ACC-06. Immediate hard delete of all data, plus Sign in with Apple token revocation. The client shows the confirmation. |
@@ -350,6 +350,7 @@ request turns out to be slow.
 | 12 | Block status is computed on the client. The server stores only `skipped`. |
 | 13 | The UI is the master spec. The SRS applies only where this log says so (#4). |
 | 14 | A general-list task that repeats on its own uses the REC-06 rule: carried over if its next occurrence is more than a day away, otherwise recorded as missed. |
+| 15 | Refresh-token reuse is detected against every token a session has retired (`session_refresh_tokens`), not only the last one. The token retired most recently stays usable for 30 seconds, for retries. Session expiry slides on each refresh. |
 
 ## 11. Error codes to add
 
@@ -361,7 +362,7 @@ Append these to `src/http/error-code.ts`:
 | `CODE_INVALID` | 400 | Wrong sign-in code. `error.meta.attemptsLeft`. **Added.** |
 | `CODE_EXPIRED` | 410 | The sign-in code is more than 10 minutes old, already used, or was never sent. **Added.** |
 | `CODE_ATTEMPTS_EXHAUSTED` | 429 | 5 wrong attempts. The user must request a new code. **Added.** |
-| `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired or revoked. |
+| `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired, revoked or reused. **Added** (refresh). |
 | `BLOCK_TOO_SHORT` / `BLOCK_TOO_LONG` | 422 | BLK-05 |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task, or `recurrence` on a task in a block. |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. |

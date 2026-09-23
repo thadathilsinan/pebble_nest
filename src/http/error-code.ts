@@ -35,7 +35,10 @@ export type ErrorCode =
   // try again, ask for a new code, or ask for a new code after too many tries.
   | 'CODE_INVALID'
   | 'CODE_EXPIRED'
-  | 'CODE_ATTEMPTS_EXHAUSTED';
+  | 'CODE_ATTEMPTS_EXHAUSTED'
+  // A refresh token that is unknown, expired, revoked or reused. One code for
+  // all of them: the client does the same thing for each — sign in again.
+  | 'TOKEN_INVALID';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted

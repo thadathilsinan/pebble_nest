@@ -22,6 +22,13 @@
       "when": 1790191798083,
       "tag": "20260923192958_auth_email_sign_in",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790192770381,
+      "tag": "20260923194610_auth_refresh_tokens",
+      "breakpoints": true
     }
   ]
 }

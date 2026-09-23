@@ -66,7 +66,7 @@ describe('Email sign-in (e2e)', () => {
 
     pool = moduleFixture.get<Pool>(POOL);
     await pool.query(
-      'TRUNCATE users, sessions, email_sign_in_codes RESTART IDENTITY CASCADE',
+      'TRUNCATE users, sessions, session_refresh_tokens, email_sign_in_codes RESTART IDENTITY CASCADE',
     );
   });
 
@@ -291,5 +291,209 @@ describe('Email sign-in (e2e)', () => {
       'SELECT attempts FROM email_sign_in_codes',
     );
     expect(rows).toEqual([{ attempts: 0 }]);
+  });
+});
+
+describe('Refresh and sign-out (e2e)', () => {
+  let app: NestExpressApplication;
+  let pool: Pool;
+  let mailer: FakeMailer;
+
+  beforeEach(async () => {
+    mailer = new FakeMailer();
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(MAILER)
+      .useValue(mailer)
+      .compile();
+
+    // As above: mirrors `main.ts`.
+    app = moduleFixture.createNestApplication<NestExpressApplication>({
+      bodyParser: false,
+    });
+    configureApp(app, moduleFixture.get<Env>(ENV));
+    await app.init();
+
+    pool = moduleFixture.get<Pool>(POOL);
+    await pool.query(
+      'TRUNCATE users, sessions, session_refresh_tokens, email_sign_in_codes RESTART IDENTITY CASCADE',
+    );
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  function http() {
+    return request(app.getHttpServer());
+  }
+
+  type SessionBody = {
+    data: {
+      accessToken: string;
+      refreshToken: string;
+      isNewAccount: boolean;
+      profile: { id: string; email: string; signInMethod: string };
+    };
+  };
+
+  async function signIn(): Promise<SessionBody['data']> {
+    await http()
+      .post('/api/v1/auth/email/code')
+      .send({ email: 'me@example.com' })
+      .expect(204);
+    const res = await http()
+      .post('/api/v1/auth/email/verify')
+      .send({
+        email: 'me@example.com',
+        code: mailer.lastCodeFor('me@example.com'),
+      })
+      .expect(200);
+    return (res.body as SessionBody).data;
+  }
+
+  function refresh(refreshToken: string) {
+    return http().post('/api/v1/auth/refresh').send({ refreshToken });
+  }
+
+  function signOut(refreshToken: string) {
+    return http().post('/api/v1/auth/sign-out').send({ refreshToken });
+  }
+
+  function expectTokenInvalid(res: request.Response) {
+    expect(res.body).toEqual({
+      error: { code: 'TOKEN_INVALID', message: anyString },
+    });
+  }
+
+  async function sessionCount(): Promise<number> {
+    const { rows } = await pool.query('SELECT 1 FROM sessions');
+    return rows.length;
+  }
+
+  /** As if the grace window had passed since every rotation so far. */
+  async function skipGrace(): Promise<void> {
+    await pool.query(
+      "UPDATE session_refresh_tokens SET retired_at = retired_at - interval '31 seconds'",
+    );
+  }
+
+  it('swaps a refresh token for a new session on the same device', async () => {
+    const first = await signIn();
+
+    const res = await refresh(first.refreshToken)
+      .expect(200)
+      .expect('X-Request-Id', /./);
+
+    const next = (res.body as SessionBody).data;
+    expect(next).toMatchObject({
+      accessToken: anyString,
+      isNewAccount: false,
+      profile: {
+        id: first.profile.id,
+        email: 'me@example.com',
+        signInMethod: 'email',
+      },
+    });
+    expect(next.refreshToken).not.toBe(first.refreshToken);
+
+    const claims = await app
+      .get(JwtService)
+      .verifyAsync<{ sub: string; sid: string }>(next.accessToken);
+    const before = await app
+      .get(JwtService)
+      .verifyAsync<{ sid: string }>(first.accessToken);
+    expect(claims.sub).toBe(first.profile.id);
+    expect(claims.sid).toBe(before.sid);
+
+    // And the new token works in turn.
+    await refresh(next.refreshToken).expect(200);
+  });
+
+  it('accepts a retry with the old token inside the grace window', async () => {
+    const first = await signIn();
+    await refresh(first.refreshToken).expect(200);
+
+    // The response above was "lost"; the app retries with the old token.
+    const retried = await refresh(first.refreshToken).expect(200);
+
+    await refresh((retried.body as SessionBody).data.refreshToken).expect(200);
+    expect(await sessionCount()).toBe(1);
+  });
+
+  it('revokes the session when an old token is reused after the grace window', async () => {
+    const first = await signIn();
+    const second = (await refresh(first.refreshToken).expect(200))
+      .body as SessionBody;
+    await skipGrace();
+
+    await refresh(first.refreshToken).expect(401).expect(expectTokenInvalid);
+
+    // Whoever held the newer token is signed out too.
+    await refresh(second.data.refreshToken)
+      .expect(401)
+      .expect(expectTokenInvalid);
+    expect(await sessionCount()).toBe(0);
+  });
+
+  it('revokes the session when a token older than the last is reused', async () => {
+    const first = await signIn();
+    const second = (await refresh(first.refreshToken).expect(200))
+      .body as SessionBody;
+    await refresh(second.data.refreshToken).expect(200);
+
+    // Inside the window, but not the token retired last.
+    await refresh(first.refreshToken).expect(401).expect(expectTokenInvalid);
+    expect(await sessionCount()).toBe(0);
+  });
+
+  it('refuses an expired session', async () => {
+    const first = await signIn();
+    await pool.query(
+      "UPDATE sessions SET expires_at = now() - interval '1 second'",
+    );
+
+    await refresh(first.refreshToken).expect(401).expect(expectTokenInvalid);
+  });
+
+  it('refuses a token it never issued', async () => {
+    await refresh('x'.repeat(43)).expect(401).expect(expectTokenInvalid);
+  });
+
+  it('signs out, after which the token no longer refreshes', async () => {
+    const first = await signIn();
+
+    await signOut(first.refreshToken).expect(204).expect('');
+
+    expect(await sessionCount()).toBe(0);
+    await refresh(first.refreshToken).expect(401).expect(expectTokenInvalid);
+  });
+
+  it('signs out idempotently', async () => {
+    const first = await signIn();
+
+    await signOut(first.refreshToken).expect(204);
+    await signOut(first.refreshToken).expect(204);
+    await signOut('x'.repeat(43)).expect(204);
+  });
+
+  it.each([
+    ['refresh', '/api/v1/auth/refresh'],
+    ['sign-out', '/api/v1/auth/sign-out'],
+  ])('%s rejects a malformed body', async (_, path) => {
+    for (const body of [
+      {},
+      { refreshToken: 'short' },
+      { refreshToken: 'x'.repeat(43), extra: 1 },
+    ]) {
+      await http()
+        .post(path)
+        .send(body)
+        .expect(400)
+        .expect((res) => {
+          expect(errorOf(res).code).toBe('VALIDATION_FAILED');
+        });
+    }
   });
 });
