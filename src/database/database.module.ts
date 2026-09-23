@@ -74,7 +74,7 @@ export type Executor = Db | Tx;
  * the API and which is the migration runner?" has no answer at the moment you
  * need it — during an incident, looking at a lock you want to kill.
  */
-const APPLICATION_NAME = 'backend_skeleton';
+const APPLICATION_NAME = 'pebble_backend';
 
 /**
  * How long a transaction may sit open doing nothing before Postgres closes it.
