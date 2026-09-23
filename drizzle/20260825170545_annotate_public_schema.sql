@@ -1,0 +1,30 @@
+-- The first migration, and deliberately a trivial one.
+--
+-- The migration mechanism shipped before any real table existed, so that the
+-- first real table would already be under its rules. That leaves this file with
+-- a job that is not "change the schema": it has to prove the whole path works
+-- end to end — generated with a timestamp prefix, journalled, applied inside a
+-- transaction, and recorded in `drizzle.__drizzle_migrations` — while changing
+-- nothing the schema conventions would then have to design around.
+--
+-- Not under an advisory lock: `drizzle-kit` takes none, so nothing stops two
+-- migration runs overlapping. See *Nothing prevents two concurrent migration
+-- runs* in `docs/migrations.md` for what that means for a deploy.
+--
+-- So it writes a comment. `COMMENT ON SCHEMA` stores a string against the
+-- schema in the catalog: no table, no column, no constraint, nothing with
+-- behaviour. It is observable (`\dn+` in psql, or the query in the runbook),
+-- which is what makes it usable as proof rather than a no-op.
+--
+-- `public` rather than `COMMENT ON DATABASE app`: the database is named
+-- `app` on a laptop and may be named something else wherever this is
+-- deployed, and the name cannot be parameterised in plain SQL. A migration that
+-- only applies where the database happens to carry the right name is precisely
+-- the environment-dependence migrations exist to remove. Every PostgreSQL
+-- database has a `public` schema.
+--
+-- Whether the first tables end up in `public` or in a named schema is not
+-- decided here. If a named schema is chosen, this comment stays correct anyway:
+-- it says where the shape comes from, not where the tables live.
+COMMENT ON SCHEMA public IS
+  'Shape is owned by the migrations in drizzle/ — see docs/migrations.md. Do not ALTER by hand: a change made here is invisible to every other environment.';

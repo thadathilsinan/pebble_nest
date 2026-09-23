@@ -1,0 +1,60 @@
+# The local development database. Not a deployment artifact — production runs a
+# Postgres somebody else operates, and nothing here describes it.
+#
+# It exists because the app refuses to boot without a reachable database — see
+# decision 5 of `docs/database-decisions.md` — which means `npm run start:dev`
+# and `npm run test:e2e` both need one running first:
+#
+#   docker compose up -d --wait
+#
+# The credentials are deliberately weak and deliberately committed. They guard a
+# throwaway container bound to localhost that holds no real data; treating them
+# as secrets would mean every contributor inventing their own and the DSN in
+# `.env.example` matching nobody's.
+
+services:
+  db:
+    # Pinned to the major version `docs/database-decisions.md` decision 1 chose,
+    # and chose for a reason: `uuidv7()` is built in from 18, so a 17 container
+    # would pass every test in this repository and fail the first migration that
+    # defaults a `uuid` column.
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports:
+      # Host port is explicit rather than ephemeral because `DATABASE_URL` in
+      # `.env.example` names it. A clash with an already-installed Postgres is
+      # the expected failure, and changing the left side here plus the DSN is
+      # the expected fix.
+      - '5432:5432'
+    volumes:
+      # Named rather than a bind mount: a bind mount puts Postgres's data
+      # directory in the repo, where file ownership differs across platforms and
+      # a stray `git clean` destroys the database.
+      #
+      # The mount point is `/var/lib/postgresql`, **not** the
+      # `/var/lib/postgresql/data` that every pre-18 example uses. The official
+      # images changed this in 18: data now lives in a major-version-specific
+      # subdirectory so `pg_upgrade --link` can work across a single mount. Mount
+      # the old path against an 18 image and the container does not start — it
+      # exits with a wall of text about `pg_ctlcluster`, which reads like a
+      # corrupt volume rather than a wrong path.
+      - app-db-data:/var/lib/postgresql
+    healthcheck:
+      # What `--wait` waits on. Without it, `docker compose up -d` returns as
+      # soon as the container starts — which is several seconds before Postgres
+      # accepts connections, so an immediately-following `npm run start` hits a
+      # refused connection and, by decision 5, exits rather than retrying.
+      #
+      # `-U app` matters: `pg_isready` defaults to the OS user, which inside
+      # this container is `postgres`, and asking about a role that does not exist
+      # reports not-ready forever.
+      test: ['CMD-SHELL', 'pg_isready -U app -d app']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  app-db-data:

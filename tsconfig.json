@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "resolvePackageJsonExports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2023",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "incremental": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // The whole family rather than the four of it this file used to name
+    // individually. Turning it on cost **zero** errors against the code that was
+    // already here, which is the argument for doing it now: the price of `strict`
+    // is paid by whatever is written while it is off, so the only cheap moment is
+    // before the first feature exists.
+    //
+    // `useUnknownInCatchVariables` is the member that matters most here. Without
+    // it a `catch (error)` binds `any`, and this service's error paths are its
+    // most load-bearing code — `AllExceptionsFilter` and `driver-error.ts` both
+    // narrow untrusted throwables structurally, which an `any` silently defeats.
+    "strict": true,
+
+    // Indexing an array yields `T | undefined`. This is not pedantry here, it is
+    // the central idiom of every repository this project will have:
+    //
+    //   const [row] = await db.insert(notes).values(input).returning();
+    //
+    // Without this, `row` is typed `NoteRow` and is `undefined` whenever the
+    // statement matched nothing — so the lie is in the one line every data-access
+    // method is built out of. With it, the empty case has to be handled where it
+    // arises. Cost when introduced: one expression, in `logging/pino-options.ts`.
+    "noUncheckedIndexedAccess": true
+  }
+}

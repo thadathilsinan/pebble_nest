@@ -1,0 +1,38 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Pinned rather than inferred. TypeScript otherwise derives the output root
+    // from the longest common directory of its inputs, so the day a `.ts` file
+    // appears at the repository root — `drizzle.config.ts` was the first —
+    // every emitted path silently gains a `src/` segment, `dist/main.js`
+    // becomes `dist/src/main.js`, and `start:prod` stops finding its entry
+    // point. Naming the root makes the layout of `dist/` a property of this
+    // file instead of a consequence of what happens to be lying around.
+    "rootDir": "./src",
+
+    // Inside `dist/`, so that it is deleted whenever `dist/` is.
+    //
+    // The default puts it beside this file, at the repository root, where
+    // `nest-cli.json`'s `deleteOutDir` cannot reach it — and the combination is
+    // a trap. `deleteOutDir` removes `dist/`, then `tsc` consults a build log
+    // that survived and concludes every output is still up to date, so it emits
+    // nothing. The result of building twice with no source change in between is
+    // no `dist/` at all, and an error naming a file you can see in your editor.
+    //
+    // It matters more now than it did: `db:migrate` and `db:migrate:status`
+    // both build before they run, so they would hit this on their second
+    // consecutive invocation rather than rarely.
+    "tsBuildInfoFile": "./dist/tsconfig.build.tsbuildinfo"
+  },
+  "exclude": [
+    "node_modules",
+    "test",
+    "dist",
+    "**/*spec.ts",
+    // Tooling configuration, not application source. `drizzle-kit` bundles and
+    // runs it itself, so compiling it into `dist/` would ship a file nothing
+    // imports — and with `rootDir` set above, attempting to is an error rather
+    // than a surprise. It is still type-checked by the base `tsconfig.json`.
+    "drizzle.config.ts"
+  ]
+}
