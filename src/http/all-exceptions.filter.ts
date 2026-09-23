@@ -237,6 +237,12 @@ function describe(exception: unknown): Outcome {
 
   if (exception instanceof HttpException) {
     const status = exception.getStatus();
+    // Like the message, `meta` is for the caller only on a 4xx: a 5xx says
+    // nothing about our internals, however it was thrown.
+    const meta =
+      status < SERVER_ERROR_FLOOR
+        ? namedMeta(exception.getResponse())
+        : undefined;
 
     return {
       status,
@@ -245,6 +251,7 @@ function describe(exception: unknown): Outcome {
         // A 5xx message describes our internals even when a developer wrote it.
         message:
           status >= SERVER_ERROR_FLOOR ? OPAQUE_MESSAGE : exception.message,
+        ...(meta === undefined ? {} : { meta }),
       },
     };
   }
@@ -334,6 +341,39 @@ function namedCode(body: unknown): ErrorCode | undefined {
   const { code } = body as { code?: unknown };
 
   return typeof code === 'string' ? (code as ErrorCode) : undefined;
+}
+
+/**
+ * Reads the `meta` an exception carries for its caller, as in
+ * `new BadRequestException({ code, message, meta: { attemptsLeft: 2 } })`.
+ *
+ * Only a `meta` key is read, and only scalar values survive it. Everything
+ * else on the response object is dropped — which is the point: a field reaches
+ * the client because someone put it under `meta` for them, never because it
+ * happened to be on the object.
+ */
+function namedMeta(body: unknown): ApiError['meta'] {
+  if (typeof body !== 'object' || body === null) return undefined;
+
+  const { meta } = body as { meta?: unknown };
+  if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(meta as Record<string, unknown>).filter(
+    (entry): entry is [string, string | number | boolean | null] => {
+      const value = entry[1];
+
+      return (
+        value === null ||
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean'
+      );
+    },
+  );
+
+  return entries.length === 0 ? undefined : Object.fromEntries(entries);
 }
 
 interface ZodIssueLike {

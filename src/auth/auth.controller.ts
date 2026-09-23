@@ -1,0 +1,23 @@
+import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { AuthService } from './auth.service';
+import { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
+import { VerifySignInCodeBody } from './dto/verify-sign-in-code.dto';
+
+@Controller('auth')
+export class AuthController {
+  constructor(private readonly auth: AuthService) {}
+
+  @Post('email/code')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async requestCode(@Body() body: RequestSignInCodeBody): Promise<void> {
+    await this.auth.requestCode(body);
+  }
+
+  // 200, not the 201 a POST defaults to: signing in returns a session, it does
+  // not create a resource the client can address.
+  @Post('email/verify')
+  @HttpCode(HttpStatus.OK)
+  verifyCode(@Body() body: VerifySignInCodeBody) {
+    return this.auth.verifyCode(body);
+  }
+}

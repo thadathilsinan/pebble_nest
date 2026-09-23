@@ -30,7 +30,12 @@ export type ErrorCode =
   | 'NOT_IMPLEMENTED'
   | 'BAD_GATEWAY'
   | 'SERVICE_UNAVAILABLE'
-  | 'GATEWAY_TIMEOUT';
+  | 'GATEWAY_TIMEOUT'
+  // Email sign-in (ACC-02). Each carries a different next step for the client:
+  // try again, ask for a new code, or ask for a new code after too many tries.
+  | 'CODE_INVALID'
+  | 'CODE_EXPIRED'
+  | 'CODE_ATTEMPTS_EXHAUSTED';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted

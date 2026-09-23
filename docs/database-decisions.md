@@ -215,8 +215,9 @@ schema and the real schema visible instead of latent.
 |---|---|---|
 | `set_updated_at()` | `drizzle/20260901154040_set_updated_at.sql` | `BEFORE UPDATE` trigger function stamping `NEW.updated_at` with the transaction time. See `docs/schema-conventions.md` §3. |
 
-The **triggers that attach it** are equally invisible to the snapshot, and there
-are none yet because there are no tables. Rather than a row per table here — a
+The **triggers that attach it** are equally invisible to the snapshot — one per
+table with an `updated_at`, first added for `users`, `email_sign_in_codes` and
+`sessions` in `drizzle/20260923192958_auth_email_sign_in.sql`. Rather than a row per table here — a
 list that would be stale the first time someone forgot to update it — they are
 named `trg_<table>_updated_at` by convention and enumerated from the database
 itself:
@@ -490,6 +491,43 @@ where it becomes real or quietly does not.
 
 ---
 
+## 9. Test isolation
+
+**Choice: every spec that touches the database truncates the tables it uses
+before each test, and jest runs one file at a time (`--runInBand`, in both
+`npm test` and `npm run test:e2e`). One shared database — the one
+`DATABASE_URL` names — for everything.**
+
+**Rejected: a transaction per test, rolled back afterwards; a database per
+worker.**
+
+Decided by the first feature, email sign-in, as `docs/adding-a-feature.md` §0
+asked. The repository specs open the app's own pool and Drizzle instance
+through `src/database/testing.ts`, so a test runs the same session settings
+production does; the e2e spec truncates through the app's `POOL`.
+
+Rollback-per-test lost on the thing the first repository most needed to test.
+`SignInCodesRepository` and `UsersRepository` both have behaviour that only
+exists *between* transactions — `SELECT … FOR UPDATE` serialising two verifies,
+`ON CONFLICT DO NOTHING` waiting for a concurrent insert to commit — and a test
+wrapped in one outer transaction cannot open a second one to race it. It would
+also need the transaction threaded through `AppModule` for the e2e, which is
+the implicit request-wide transaction decision 8 rejected.
+
+A database per worker would allow parallel files, and is the upgrade path when
+the suite is slow enough to matter. It needs each worker to create and migrate
+its own database, which is machinery this project does not need at 35 tests
+running in under two seconds.
+
+**What it costs.** The suite is serial, and it **empties the tables in whatever
+database `DATABASE_URL` points at**: running the tests against a database whose
+data you want is how you lose it. A developer's `psql` session is not isolated
+from a running test either. Each spec must name every table it writes, and a
+spec that forgets one leaves rows for the next to trip on — the failure shows
+up in a different file from its cause.
+
+---
+
 ## 10. Driver error mapping
 
 **Choice: SQLSTATE mapped to a status and a stable code in one table, with fixed
@@ -500,9 +538,9 @@ named code.**
 **Rejected: mapping per constraint name; parsing the driver's `detail` text;
 `instanceof DatabaseError` as the detection mechanism.**
 
-Numbered 10 rather than 9 on purpose — 9 stays reserved for test isolation, so
-that the numbers already cited from `database.module.ts` and
-`schema-conventions.md` keep pointing at what they meant.
+Numbered 10 rather than 9 on purpose — 9 was held for test isolation, so that
+the numbers already cited from `database.module.ts` and `schema-conventions.md`
+keep pointing at what they meant.
 
 Before this, every constraint violation fell through `AllExceptionsFilter`'s last
 branch and rendered as a 500. That is wrong for the caller, who is told the
@@ -567,9 +605,8 @@ no content is understood as deliberately dropped rather than forgotten:
 
 ## Deliberately still open
 
-These are still to be decided, listed only so their absence here is not read as
-an oversight: test isolation, which is why decision 9 is reserved rather than
-filled. Concurrency control was on this list and is now decision 7; the
+Test isolation was on this list and is now decision 9. Concurrency control was
+on it and is now decision 7; the
 repository boundary was on it and is now decision 8 — though see that entry for
 what it does *not* yet ship.
 

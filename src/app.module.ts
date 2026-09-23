@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
+import { AuthModule } from './auth/auth.module';
 import { AppConfigModule } from './config/config.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
@@ -20,10 +19,14 @@ import { ZodValidationPipe } from './validation/validation.pipe';
   // `NestFactory.create`. That is deliberate, and it is why a
   // `Test.createTestingModule` importing this module needs a real Postgres —
   // `docker compose up -d --wait` first.
-  imports: [AppConfigModule, LoggingModule, DatabaseModule, HealthModule],
-  controllers: [AppController],
+  imports: [
+    AppConfigModule,
+    LoggingModule,
+    DatabaseModule,
+    HealthModule,
+    AuthModule,
+  ],
   providers: [
-    AppService,
     // Registered here rather than in `main.ts` so tests built with
     // `Test.createTestingModule` validate exactly as production does.
     { provide: APP_PIPE, useClass: ZodValidationPipe },

@@ -30,10 +30,8 @@ export const POOL = Symbol('POOL');
 export const DB = Symbol('DB');
 
 /**
- * The schema module as a type. Empty today — `schema.ts` declares no tables yet,
- * deliberately — which costs exactly one thing: `db.query.<table>` has nothing on
- * it. Every other capability is live now, and the first `pgTable` added to
- * `schema.ts` populates this with no change here.
+ * The schema module as a type. Every `pgTable` exported from `schema.ts` appears
+ * on `db.query.<table>` with no change here.
  */
 export type Schema = typeof schema;
 

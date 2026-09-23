@@ -24,6 +24,17 @@ export interface ApiError {
   /** Human-readable and free to be reworded. Not a contract. */
   message: string;
   details?: ErrorDetail[];
+  /**
+   * Values specific to one code that a client acts on — `attemptsLeft` on
+   * `CODE_INVALID`, `retryAfterSeconds` on a rate-limited `TOO_MANY_REQUESTS`.
+   * Each code documents its own keys in `docs/api-plan.md`; like `code`, a key
+   * is never renamed once shipped.
+   *
+   * Only ever set from an explicit `meta` object at a 4xx throw site, never
+   * copied from anything else on the exception, so nothing reaches here that
+   * someone did not write down for the caller.
+   */
+  meta?: Record<string, string | number | boolean | null>;
 }
 
 export interface ApiFailure {

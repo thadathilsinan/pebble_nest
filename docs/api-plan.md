@@ -93,8 +93,8 @@ Screens: sign-in, code entry, first run, You.
 
 | Method | Path | Body / query | Response | Notes |
 |---|---|---|---|---|
-| POST | `/auth/email/code` | `{ email }` | 204 | Sends a 6-digit code that expires after 10 minutes. A new code replaces the old one. Rate-limited per email. Also used for "Send another code". |
-| POST | `/auth/email/verify` | `{ email, code }` | `Session` | Errors: `CODE_INVALID` with `attemptsLeft`, `CODE_EXPIRED`, `CODE_ATTEMPTS_EXHAUSTED` (at most 5 attempts). |
+| POST | `/auth/email/code` | `{ email }` | 204 | **Built.** Sends a 6-digit code that expires after 10 minutes. A new code replaces the old one and resets its attempts. Rate-limited per email: one send per 30 seconds and five per hour, otherwise `429 TOO_MANY_REQUESTS` with `meta.retryAfterSeconds`. Answers the same whether or not an account exists. Also used for "Send another code". |
+| POST | `/auth/email/verify` | `{ email, code }` | `Session` (200) | **Built.** Checked in this order: no code on file, or expired, or already used → `410 CODE_EXPIRED`; 5 wrong attempts already → `429 CODE_ATTEMPTS_EXHAUSTED`, even for the right code; wrong code → `400 CODE_INVALID` with `meta.attemptsLeft` (0 on the fifth miss). A code that isn't six digits is `400 VALIDATION_FAILED` and doesn't use up an attempt. |
 | POST | `/auth/google` | `{ idToken }` | `Session` | |
 | POST | `/auth/apple` | `{ identityToken, authorizationCode, fullName? }` | `Session` | Apple sends the name only on first sign-in, so store it then. Keep the Apple refresh token; account deletion revokes it. |
 | POST | `/auth/refresh` | `{ refreshToken }` | `Session` | Rotates the token. Presenting an already-used refresh token revokes that whole device session. |
@@ -124,7 +124,10 @@ Profile = {
   then calls `PATCH /me { weekStart }`. **No name is asked for.** Google and Apple
   fill it in when they can.
 - **ACC-03:** the same verified email opens the same account whichever method is
-  used. An Apple private-relay address won't match the other methods.
+  used. An Apple private-relay address won't match the other methods. Emails are
+  trimmed and lower-cased before anything else happens.
+- **Error values the client acts on** travel in `error.meta`, e.g.
+  `{ "error": { "code": "CODE_INVALID", "message": "…", "meta": { "attemptsLeft": 3 } } }`.
 
 ## 3. Timeline (TML)
 
@@ -355,9 +358,9 @@ Append these to `src/http/error-code.ts`:
 | Code | Status | When |
 |---|---|---|
 | `STALE_VERSION` | 409 | A `PATCH` carried an old `version`. The response body includes the current state. |
-| `CODE_INVALID` | 400 | Wrong sign-in code. The response includes `attemptsLeft`. |
-| `CODE_EXPIRED` | 410 | The sign-in code is more than 10 minutes old. |
-| `CODE_ATTEMPTS_EXHAUSTED` | 429 | 5 wrong attempts. The user must request a new code. |
+| `CODE_INVALID` | 400 | Wrong sign-in code. `error.meta.attemptsLeft`. **Added.** |
+| `CODE_EXPIRED` | 410 | The sign-in code is more than 10 minutes old, already used, or was never sent. **Added.** |
+| `CODE_ATTEMPTS_EXHAUSTED` | 429 | 5 wrong attempts. The user must request a new code. **Added.** |
 | `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired or revoked. |
 | `BLOCK_TOO_SHORT` / `BLOCK_TOO_LONG` | 422 | BLK-05 |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task, or `recurrence` on a task in a block. |
@@ -380,7 +383,8 @@ These decisions add behaviour the UI doesn't have yet:
 
 ## 13. Still to set up (not blocking)
 
-- A transactional email provider for sign-in codes.
+- A transactional email provider for sign-in codes. Until then `MAILER=log` writes
+  codes to the log, and the service refuses to start with it in production.
 - Google OAuth client IDs for iOS, Android and web.
 - Apple: Service ID / bundle ID, Team ID, and a Key ID with its private key. These
   are needed for sign-in, the code exchange and token revocation.

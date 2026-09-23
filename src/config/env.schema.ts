@@ -103,155 +103,200 @@ function describeDsnProblem(value: string): string | null {
  *
  * `process.env` holds strings, so anything non-string needs `z.coerce`.
  */
-export const envSchema = z.object({
-  NODE_ENV: z
-    .enum(['development', 'test', 'production'])
-    .default('development'),
-  PORT: z.coerce.number().int().positive().max(65535).default(3000),
-  /**
-   * Pino's level names, in pino's own order. `silent` disables logging outright
-   * and is what test runs want; `info` is the floor a production process should
-   * ever be set to.
-   */
-  LOG_LEVEL: z
-    .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
-    .default('info'),
-  /**
-   * Origins allowed to make cross-origin browser requests, comma-separated.
-   *
-   * Empty — the default — disables CORS outright rather than allowing anything,
-   * so a deployment has no cross-origin caller until someone names one. `*` is
-   * not special-cased and fails validation: an allowlist is the whole point, and
-   * a public API should be a deliberate code change rather than an env value.
-   *
-   * The split happens here because this file is the only place a variable's
-   * shape is decided, which is what lets consumers inject a `string[]` and never
-   * see the comma-separated form.
-   */
-  CORS_ORIGINS: z
-    .string()
-    .default('')
-    .transform((raw) =>
-      raw
-        .split(',')
-        .map((origin) => origin.trim())
-        .filter(Boolean),
-    )
-    .pipe(
-      z.array(
-        z.string().refine(isBareOrigin, {
-          message:
-            'Must be a bare origin like https://app.example.com — no trailing slash or path',
-        }),
+export const envSchema = z
+  .object({
+    NODE_ENV: z
+      .enum(['development', 'test', 'production'])
+      .default('development'),
+    PORT: z.coerce.number().int().positive().max(65535).default(3000),
+    /**
+     * Pino's level names, in pino's own order. `silent` disables logging outright
+     * and is what test runs want; `info` is the floor a production process should
+     * ever be set to.
+     */
+    LOG_LEVEL: z
+      .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
+      .default('info'),
+    /**
+     * Origins allowed to make cross-origin browser requests, comma-separated.
+     *
+     * Empty — the default — disables CORS outright rather than allowing anything,
+     * so a deployment has no cross-origin caller until someone names one. `*` is
+     * not special-cased and fails validation: an allowlist is the whole point, and
+     * a public API should be a deliberate code change rather than an env value.
+     *
+     * The split happens here because this file is the only place a variable's
+     * shape is decided, which is what lets consumers inject a `string[]` and never
+     * see the comma-separated form.
+     */
+    CORS_ORIGINS: z
+      .string()
+      .default('')
+      .transform((raw) =>
+        raw
+          .split(',')
+          .map((origin) => origin.trim())
+          .filter(Boolean),
+      )
+      .pipe(
+        z.array(
+          z.string().refine(isBareOrigin, {
+            message:
+              'Must be a bare origin like https://app.example.com — no trailing slash or path',
+          }),
+        ),
       ),
-    ),
-  /**
-   * How long one request may occupy a handler before the caller is answered with
-   * a 504.
-   *
-   * The gap this closes: `DB_ACQUIRE_TIMEOUT_MS` and `DB_STATEMENT_TIMEOUT_MS`
-   * bound one *statement* each, and nothing bounded a *request*. Two sequential
-   * queries that each sit just inside their limits take twice as long as either,
-   * and a handler doing no database work at all — a regex, an await on something
-   * external, a loop — was unbounded. So the caller's own patience was the only
-   * limit, and a client that gives up still leaves this process working.
-   *
-   * 15s rather than the 10s those two sum to, so that a request legitimately
-   * spending its full database budget is not cut off by the very limit meant to
-   * catch the things that have no budget.
-   *
-   * **Read what this does not do.** It stops *waiting* and answers; it does not
-   * cancel the work. The statement carries on until `statement_timeout` kills it
-   * and the promise settles into nothing — so this protects the caller and the
-   * connection it was holding, not the database. Cancelling properly needs the
-   * work itself to be abortable, which is a per-handler concern. A timeout firing
-   * is therefore a bug report, not a tuning signal: something took longer than
-   * anything here should.
-   */
-  REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
-  /**
-   * How to reach Postgres, entire: host, port, credentials, database and TLS
-   * mode in one string.
-   *
-   * **The only variable here with no default**, which breaks the property the
-   * rest of this schema has and `.env.example` used to advertise. Every other
-   * variable has a defensible default because a wrong guess is recoverable — the
-   * port is free, the log level is noise. There is no defensible default for
-   * *which database this service writes to*. A localhost fallback would mean a
-   * misconfigured production deployment silently connects somewhere else, or
-   * nowhere, instead of refusing to start; that trade is not close.
-   *
-   * One string rather than six variables because it is what `psql`, `pg_dump`
-   * and `drizzle-kit` all read. Splitting it would give the app one description
-   * of this database and every other tool a second.
-   */
-  DATABASE_URL: z.string().superRefine((value, ctx) => {
-    const problem = describeDsnProblem(value);
+    /**
+     * How long one request may occupy a handler before the caller is answered with
+     * a 504.
+     *
+     * The gap this closes: `DB_ACQUIRE_TIMEOUT_MS` and `DB_STATEMENT_TIMEOUT_MS`
+     * bound one *statement* each, and nothing bounded a *request*. Two sequential
+     * queries that each sit just inside their limits take twice as long as either,
+     * and a handler doing no database work at all — a regex, an await on something
+     * external, a loop — was unbounded. So the caller's own patience was the only
+     * limit, and a client that gives up still leaves this process working.
+     *
+     * 15s rather than the 10s those two sum to, so that a request legitimately
+     * spending its full database budget is not cut off by the very limit meant to
+     * catch the things that have no budget.
+     *
+     * **Read what this does not do.** It stops *waiting* and answers; it does not
+     * cancel the work. The statement carries on until `statement_timeout` kills it
+     * and the promise settles into nothing — so this protects the caller and the
+     * connection it was holding, not the database. Cancelling properly needs the
+     * work itself to be abortable, which is a per-handler concern. A timeout firing
+     * is therefore a bug report, not a tuning signal: something took longer than
+     * anything here should.
+     */
+    REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+    /**
+     * How to reach Postgres, entire: host, port, credentials, database and TLS
+     * mode in one string.
+     *
+     * **The only variable here with no default**, which breaks the property the
+     * rest of this schema has and `.env.example` used to advertise. Every other
+     * variable has a defensible default because a wrong guess is recoverable — the
+     * port is free, the log level is noise. There is no defensible default for
+     * *which database this service writes to*. A localhost fallback would mean a
+     * misconfigured production deployment silently connects somewhere else, or
+     * nowhere, instead of refusing to start; that trade is not close.
+     *
+     * One string rather than six variables because it is what `psql`, `pg_dump`
+     * and `drizzle-kit` all read. Splitting it would give the app one description
+     * of this database and every other tool a second.
+     */
+    DATABASE_URL: z.string().superRefine((value, ctx) => {
+      const problem = describeDsnProblem(value);
 
-    if (problem !== null) {
-      ctx.addIssue({ code: 'custom', message: problem });
+      if (problem !== null) {
+        ctx.addIssue({ code: 'custom', message: problem });
+      }
+    }),
+    /**
+     * Connections this instance holds open.
+     *
+     * The arithmetic that matters: `DB_POOL_MAX` × instance count must stay under
+     * the server's `max_connections` (100 by default), with room left over for
+     * migrations, monitoring and a human with `psql` during an incident — which is
+     * exactly when the pool is also at its fullest. Four instances at 10 is 40 of
+     * 100, which leaves that room. Twelve instances at 10 does not, and the first
+     * symptom is the migration that cannot get a connection to fix the problem.
+     *
+     * Bigger is not faster. Postgres runs one process per connection, so past the
+     * point where the server's cores are busy, more connections buy context
+     * switching rather than throughput.
+     */
+    DB_POOL_MAX: z.coerce.number().int().positive().default(10),
+    /**
+     * How long a caller waits for a connection before giving up.
+     *
+     * Named for *acquiring* rather than connecting, and the name is deliberate.
+     * In `node-postgres` this single setting covers two different situations:
+     * opening a new connection, and queueing for a busy pool to hand one back.
+     * The second is the one you will actually see, and it fires
+     * while the database is entirely healthy and merely saturated. A variable
+     * called "connect timeout" makes that read as "the database is unreachable",
+     * which sends whoever is holding the pager to investigate the wrong system.
+     */
+    DB_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    /**
+     * Server-side cap on a single statement, applied to every connection the pool
+     * opens.
+     *
+     * This is a safety limit, not a performance setting. Postgres cancels the
+     * statement, which releases the locks it held — and a query holding locks
+     * indefinitely is what turns one slow request into a stalled service and a
+     * migration that cannot acquire its own lock.
+     *
+     * 5s is a starting value chosen with no real query to calibrate against.
+     * Erring tight is the safer direction: too tight surfaces as a loud, specific
+     * error on one endpoint, while too loose surfaces as everything degrading at
+     * once. *Revisit when a legitimate query first exceeds it* — and revisit by
+     * looking at the query.
+     */
+    DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    /**
+     * How long a statement may take before its log line is raised from `debug` to
+     * `warn`.
+     *
+     * This changes nothing about how the query runs — only whether anyone hears
+     * about it. It is the early-warning half of the pair whose late half is
+     * `DB_STATEMENT_TIMEOUT_MS`: that one is the cliff a runaway query falls off,
+     * this one is the trend you can watch approach it. Well under the timeout for
+     * exactly that reason — set them close together and the warning arrives at the
+     * same moment as the failure it was supposed to precede.
+     *
+     * 500ms is a starting value with no real query to calibrate against, chosen
+     * as roughly the point where a single statement is a visible share of a
+     * request a human is waiting on. *Revisit once real queries exist* — too low
+     * and the warnings are ignored, which is the same as not having them.
+     */
+    DB_SLOW_QUERY_MS: z.coerce.number().int().positive().default(500),
+    /**
+     * The HS256 key access tokens are signed with.
+     *
+     * No default, for the same reason as `DATABASE_URL`: a guessable fallback
+     * would let anyone who read this file mint tokens for any account on a
+     * deployment that forgot to set it. At least 32 characters, since HS256's
+     * strength is the key's and nothing else's.
+     */
+    JWT_SECRET: z.string().min(32),
+    /**
+     * How long an access token lives. Short on purpose (api-plan decision 9):
+     * an access token cannot be revoked, so this is the window a stolen one is
+     * good for. The refresh token is what keeps a device signed in.
+     */
+    ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+    /** How long a device stays signed in without using its refresh token. */
+    REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(60),
+    /**
+     * The HMAC key sign-in codes are hashed under before they are stored.
+     *
+     * Separate from `JWT_SECRET` so rotating one does not invalidate the other,
+     * and keyed at all because a six-digit code has only a million values: a
+     * plain hash of one is reversed by trying them all.
+     */
+    SIGN_IN_CODE_SECRET: z.string().min(32),
+    /**
+     * Where sign-in codes are sent.
+     *
+     * `log` writes the code to the application log and sends nothing. It is the
+     * only mailer until a provider is chosen (api-plan §13), and it is refused in
+     * production below: there it would put working sign-in codes in the logs and
+     * leave every user unable to sign in.
+     */
+    MAILER: z.enum(['log']).default('log'),
+  })
+  .superRefine((env, ctx) => {
+    if (env.NODE_ENV === 'production' && env.MAILER === 'log') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['MAILER'],
+        message:
+          'The log mailer writes sign-in codes to the log and sends no email. Configure a real provider before running in production',
+      });
     }
-  }),
-  /**
-   * Connections this instance holds open.
-   *
-   * The arithmetic that matters: `DB_POOL_MAX` × instance count must stay under
-   * the server's `max_connections` (100 by default), with room left over for
-   * migrations, monitoring and a human with `psql` during an incident — which is
-   * exactly when the pool is also at its fullest. Four instances at 10 is 40 of
-   * 100, which leaves that room. Twelve instances at 10 does not, and the first
-   * symptom is the migration that cannot get a connection to fix the problem.
-   *
-   * Bigger is not faster. Postgres runs one process per connection, so past the
-   * point where the server's cores are busy, more connections buy context
-   * switching rather than throughput.
-   */
-  DB_POOL_MAX: z.coerce.number().int().positive().default(10),
-  /**
-   * How long a caller waits for a connection before giving up.
-   *
-   * Named for *acquiring* rather than connecting, and the name is deliberate.
-   * In `node-postgres` this single setting covers two different situations:
-   * opening a new connection, and queueing for a busy pool to hand one back.
-   * The second is the one you will actually see, and it fires
-   * while the database is entirely healthy and merely saturated. A variable
-   * called "connect timeout" makes that read as "the database is unreachable",
-   * which sends whoever is holding the pager to investigate the wrong system.
-   */
-  DB_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
-  /**
-   * Server-side cap on a single statement, applied to every connection the pool
-   * opens.
-   *
-   * This is a safety limit, not a performance setting. Postgres cancels the
-   * statement, which releases the locks it held — and a query holding locks
-   * indefinitely is what turns one slow request into a stalled service and a
-   * migration that cannot acquire its own lock.
-   *
-   * 5s is a starting value chosen with no real query to calibrate against.
-   * Erring tight is the safer direction: too tight surfaces as a loud, specific
-   * error on one endpoint, while too loose surfaces as everything degrading at
-   * once. *Revisit when a legitimate query first exceeds it* — and revisit by
-   * looking at the query.
-   */
-  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
-  /**
-   * How long a statement may take before its log line is raised from `debug` to
-   * `warn`.
-   *
-   * This changes nothing about how the query runs — only whether anyone hears
-   * about it. It is the early-warning half of the pair whose late half is
-   * `DB_STATEMENT_TIMEOUT_MS`: that one is the cliff a runaway query falls off,
-   * this one is the trend you can watch approach it. Well under the timeout for
-   * exactly that reason — set them close together and the warning arrives at the
-   * same moment as the failure it was supposed to precede.
-   *
-   * 500ms is a starting value with no real query to calibrate against, chosen
-   * as roughly the point where a single statement is a visible share of a
-   * request a human is waiting on. *Revisit once real queries exist* — too low
-   * and the warnings are ignored, which is the same as not having them.
-   */
-  DB_SLOW_QUERY_MS: z.coerce.number().int().positive().default(500),
-});
+  });
 
 export type Env = z.infer<typeof envSchema>;

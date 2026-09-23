@@ -15,6 +15,13 @@
       "when": 1788277240923,
       "tag": "20260901154040_set_updated_at",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790191798083,
+      "tag": "20260923192958_auth_email_sign_in",
+      "breakpoints": true
     }
   ]
 }

@@ -47,12 +47,10 @@ that shape, written out — including why the executor parameter is required rat
 than defaulted, which is the difference between a forgotten `tx` being a compile
 error and being a partial write nobody sees.
 
-**3. Test isolation.** This is **decision 9 in `docs/database-decisions.md`, which
-is reserved and still empty.** Every repository test talks to a real Postgres, so
-two specs touching the same table interfere, and `jest` runs files in parallel by
-default. §9 states the minimum that works; **whoever builds the first repository
-owes decision 9 an entry**, because from the second feature onward it is too late
-to choose cheaply.
+**3. Test isolation.** Settled by the first feature (email sign-in) as **decision 9
+in `docs/database-decisions.md`**: truncate the tables a spec touches before each
+test, and run jest `--runInBand`. `src/database/testing.ts` opens the app's own
+pool for a repository spec. §9 has the rule.
 
 **4. Authorization.** There are no guards, no `@Public()` decorator and no token
 verification anywhere in this skeleton. **Every route added today is reachable by
@@ -410,6 +408,14 @@ second shape inside it. `@NoEnvelope()` exists for bodies that are not ours to
 shape — a file download, a redirect, a format an external consumer fixed — and
 is not an opt-out for convenience.
 
+**Values a client acts on go in `error.meta`**, and nowhere else: throw
+`new BadRequestException({ code, message, meta: { attemptsLeft: 2 } })`.
+`AllExceptionsFilter` copies `meta` onto a 4xx and drops every other key on the
+thrown object, so a field reaches the client only if it was put there for them.
+`meta` holds scalars only. A value that is a whole resource, such as the current
+state `STALE_VERSION` owes (§6.3), needs its own rule in the filter when the
+first `PATCH` arrives.
+
 ### 5.2 List endpoints: cursor pagination, inside `data`
 
 **Choice: keyset (cursor) pagination on `id`, with the page metadata inside
@@ -726,13 +732,12 @@ and the comment there records the bug their absence caused. Write the path out
 literally rather than composing it from `API_PREFIX`; the existing spec explains
 why a derived path makes the assertion tautological.
 
-**Test isolation is unsettled — this is decision 9, reserved and empty.** The
-minimum that works: each repository spec truncates the tables it touches in
-`beforeEach` (`TRUNCATE … RESTART IDENTITY CASCADE`), and jest runs with
-`--runInBand` so two files cannot interleave against one database. It is a floor,
-not a design — it serialises the suite and it does not isolate a developer's
-`psql` session from a running test. **If you are the first feature, write what you
-chose into decision 9** rather than leaving the second feature to infer it.
+**Test isolation is decision 9 in `docs/database-decisions.md`.** Each spec that
+touches the database truncates the tables it uses in `beforeEach`
+(`TRUNCATE … RESTART IDENTITY CASCADE`), and jest runs with `--runInBand` so two
+files cannot interleave against one database. Open the database for a repository
+spec with `openTestDatabase()` from `src/database/testing.ts`. The suite empties
+whatever `DATABASE_URL` names, so never point it at data you want.
 
 ---
 
@@ -1184,7 +1189,8 @@ connection rather than the database.
 is wired. Until it is, §2 step 1 — writing the URLs down — is the only
 description of the API, and it lives wherever you put it.
 
-**Test isolation.** Decision 9, reserved. §9 states a floor, not a design.
+**Test isolation beyond a serial suite.** Decision 9 records the upgrade path — a
+database per worker — and why it is not built yet.
 
 **Pagination for any order other than newest-first**, and compound cursors
 (§5.2).
