@@ -160,7 +160,7 @@ Screens: block slip, block sheet.
 
 | Method | Path | Body / query | Response |
 |---|---|---|---|
-| POST | `/blocks` | `{ name, date, startMin, endMin, recurrence?, alert, idempotencyKey? }` | `BlockOccurrence` |
+| POST | `/blocks` | `{ name, date, startMin, endMin, recurrence?, alert, idempotencyKey? }` | `BlockOccurrence` (201). **Built.** See below. |
 | PATCH | `/blocks/{seriesId}/occurrences/{date}` | `{ version, scope, name?, startMin?, endMin?, newDate?, recurrence?, alert? }` | `BlockOccurrence` |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}` | `?scope=onlyThis\|series` | `{ movedTaskCount }` (200) |
 | POST | `/blocks/{seriesId}/occurrences/{date}/skip` | — | `{ movedTaskCount }` |
@@ -169,7 +169,20 @@ Screens: block slip, block sheet.
 | PUT | `/block-names/{name}/trace` | `{ trace }` | 204 |
 
 - **Validation:** name is 1–60 characters after trimming. Length is at least 5
-  minutes and at most 24 hours (BLK-05). Blocks may overlap (BLK-03).
+  minutes, otherwise `422 BLOCK_TOO_SHORT` (BLK-05). `endMin = startMin` is a full
+  24 hours, which is also the most minute-of-day values can express, so there is
+  no too-long case. Blocks may overlap (BLK-03). Any date is accepted, past
+  included.
+- **Create (built):** `recurrence` is optional, and leaving it out means `none`.
+  `weekdays` is accepted only with `weekly`, `monthDays` only with `monthly`, and
+  `until` only with a kind that repeats, on or after `date`. An empty or missing
+  day list means `date`'s own weekday or day of the month, and the server stores
+  and returns it filled in, so a returned `Recurrence` is always explicit.
+  Duplicate days are dropped. A retry with the same `idempotencyKey` returns the
+  block the first request created, with 201, whatever the retry's body says. The
+  key is scoped to the user. The response is the occurrence on `date`, with
+  `tasks: []` and `trace: null` until those slices exist. It does not read the
+  session (decision 16).
 - **Edit scope** is `onlyThis` or `thisAndFuture`, and is ignored for a
   non-repeating block. `recurrence` is accepted only with `thisAndFuture`. Past
   occurrences never change.
@@ -360,6 +373,7 @@ request turns out to be slow.
 | 16 | The auth guard is stateless: it checks the access token's signature and expiry, not the session. A revoked session's access token works for up to 15 minutes, except on endpoints that read the session (`GET /me`). Every bad access token is `401 TOKEN_INVALID`. There is no separate expired code. |
 | 17 | `PATCH /me` with only `timeZone` needs no `version` and is last-write-wins, because it's a fact the device reports, not an edit. A `409 STALE_VERSION` carries the current resource in `error.meta.current`, the one object-valued `meta` key. A write that changes nothing doesn't bump `version`. |
 | 18 | `DELETE /me` needs a live session, so a revoked device's access token can't delete the account. A retry after the account is gone gets `401 TOKEN_INVALID` rather than 204. The email's sign-in code row is deleted too. No re-authentication is required. Every user-owned table cascades from `users`, so the delete stays a single statement plus the email-keyed cleanup. |
+| 19 | Idempotent creates use `INSERT … ON CONFLICT (user_id, idempotency_key) DO NOTHING` and then a select. A retry, even a concurrent one, gets the original with 201, and its body is not compared with the original's. The loser of a race waits for the winner's commit, so there is no in-progress case. A recurrence is stored with explicit days: the server fills in an empty `weekdays`/`monthDays` from the anchor date. |
 
 ## 11. Error codes to add
 
@@ -372,9 +386,9 @@ Append these to `src/http/error-code.ts`:
 | `CODE_EXPIRED` | 410 | The sign-in code is more than 10 minutes old, already used, or was never sent. **Added.** |
 | `CODE_ATTEMPTS_EXHAUSTED` | 429 | 5 wrong attempts. The user must request a new code. **Added.** |
 | `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired, revoked or reused. **Added** (refresh, auth guard). |
-| `BLOCK_TOO_SHORT` / `BLOCK_TOO_LONG` | 422 | BLK-05 |
+| `BLOCK_TOO_SHORT` | 422 | BLK-05. **Added** (`POST /blocks`). `BLOCK_TOO_LONG` was dropped: minute-of-day start and end can't describe more than 24 hours. |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task, or `recurrence` on a task in a block. |
-| `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. **Not needed so far:** a create that inserts in one statement never exposes an unfinished original (decision 19). Add it only for a create that holds its insert open inside a longer transaction. |
 
 ## 12. Changes needed in the Flutter app
 

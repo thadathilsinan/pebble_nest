@@ -42,7 +42,10 @@ export type ErrorCode =
   // A PATCH carried a `version` someone else has already moved past. The
   // current resource travels in `error.meta.current`, so the client can
   // re-apply its edit and retry in one round trip.
-  | 'STALE_VERSION';
+  | 'STALE_VERSION'
+  // BLK-05: a block shorter than 5 minutes. There is no BLOCK_TOO_LONG: a start
+  // and end in minutes of the day cannot describe more than 24 hours.
+  | 'BLOCK_TOO_SHORT';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted

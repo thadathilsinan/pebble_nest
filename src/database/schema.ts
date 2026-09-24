@@ -22,11 +22,14 @@
 
 import { sql, type SQL } from 'drizzle-orm';
 import {
+  boolean,
   check,
+  date,
   foreignKey,
   index,
   integer,
   pgTable,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -46,10 +49,12 @@ function oneOf(column: SQL, values: readonly string[]): SQL {
 export const WEEK_STARTS = ['monday', 'sunday'] as const;
 export const TIME_FORMATS = ['system', 'h24', 'h12'] as const;
 export const SIGN_IN_METHODS = ['google', 'apple', 'email'] as const;
+export const RECURRENCE_KINDS = ['none', 'daily', 'weekly', 'monthly'] as const;
 
 export type WeekStart = (typeof WEEK_STARTS)[number];
 export type TimeFormat = (typeof TIME_FORMATS)[number];
 export type SignInMethod = (typeof SIGN_IN_METHODS)[number];
+export type RecurrenceKind = (typeof RECURRENCE_KINDS)[number];
 
 /**
  * One account. ACC-03: the verified email *is* the account, whichever method
@@ -258,3 +263,111 @@ export const sessionRefreshTokens = pgTable(
 );
 
 export type SessionRefreshTokenRow = typeof sessionRefreshTokens.$inferSelect;
+
+/**
+ * A block definition (`docs/api-plan.md` §1). A one-off block is a series of
+ * one, with `recurrence_kind = 'none'`; its only occurrence is `anchor_date`.
+ *
+ * Time is local (decision 6): a date plus minutes from local midnight, with no
+ * offset. `end_min <= start_min` means the block crosses midnight (BLK-04), so
+ * `end_min = start_min` is a full 24 hours. The length checks below are BLK-05's
+ * lower bound; there is no upper-bound check, because minute-of-day start and
+ * end cannot describe more than 24 hours.
+ *
+ * `weekdays` and `month_days` are stored explicitly, never empty for the kind
+ * that uses them: an empty set sent by the client means "the anchor's day", and
+ * the service fills that in, so readers never need the anchor to interpret a
+ * recurrence. The checks keep each array empty for the other kinds.
+ */
+export const blockSeries = pgTable(
+  'block_series',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    userId: uuid('user_id').notNull(),
+    name: text('name').notNull(),
+    anchorDate: date('anchor_date', { mode: 'string' }).notNull(),
+    startMin: smallint('start_min').notNull(),
+    endMin: smallint('end_min').notNull(),
+    recurrenceKind: text('recurrence_kind', { enum: RECURRENCE_KINDS })
+      .notNull()
+      .default('none'),
+    // 1 = Monday … 7 = Sunday.
+    weekdays: smallint('weekdays')
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    // 1..31. REC-02: a day past a short month's end falls on its last day,
+    // which is a read-time rule, so 31 is stored as 31.
+    monthDays: smallint('month_days')
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    // Null means the repeat never ends (REC-03).
+    until: date('until', { mode: 'string' }),
+    alert: boolean('alert').notNull().default(false),
+    // schema-conventions §10: blocks are edited from more than one device.
+    version: integer('version').notNull().default(0),
+    // schema-conventions §9: POST /blocks may be retried after a lost response.
+    idempotencyKey: uuid('idempotency_key'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Cascade: decision 18 — DELETE /me stays a single delete.
+    foreignKey({
+      name: 'fk_block_series_user_id',
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+    // Scoped to the owner, so a key is never a way to read someone else's
+    // block (schema-conventions §9). A null key never conflicts. It leads with
+    // `user_id`, so it is also the foreign key's index (schema-conventions
+    // §6): the cascade's scan and reading a user's series both use it.
+    uniqueIndex('uq_block_series_user_id_idempotency_key').on(
+      table.userId,
+      table.idempotencyKey,
+    ),
+    check(
+      'ck_block_series_name_length',
+      sql`char_length(${table.name}) BETWEEN 1 AND 60 AND ${table.name} = btrim(${table.name})`,
+    ),
+    check(
+      'ck_block_series_start_min',
+      sql`${table.startMin} BETWEEN 0 AND 1439`,
+    ),
+    check('ck_block_series_end_min', sql`${table.endMin} BETWEEN 0 AND 1439`),
+    // BLK-05: at least 5 minutes, counting a midnight crossing.
+    check(
+      'ck_block_series_min_length',
+      sql`(${table.endMin} - ${table.startMin} + 1440) % 1440 >= 5 OR ${table.endMin} = ${table.startMin}`,
+    ),
+    check(
+      'ck_block_series_recurrence_kind',
+      oneOf(sql`${table.recurrenceKind}`, RECURRENCE_KINDS),
+    ),
+    check(
+      'ck_block_series_weekdays',
+      sql`CASE WHEN ${table.recurrenceKind} = 'weekly'
+        THEN cardinality(${table.weekdays}) > 0 AND ${table.weekdays} <@ '{1,2,3,4,5,6,7}'::smallint[]
+        ELSE cardinality(${table.weekdays}) = 0 END`,
+    ),
+    check(
+      'ck_block_series_month_days',
+      sql`CASE WHEN ${table.recurrenceKind} = 'monthly'
+        THEN cardinality(${table.monthDays}) > 0 AND 1 <= ALL(${table.monthDays}) AND 31 >= ALL(${table.monthDays})
+        ELSE cardinality(${table.monthDays}) = 0 END`,
+    ),
+    check(
+      'ck_block_series_until',
+      sql`${table.until} IS NULL OR (${table.recurrenceKind} <> 'none' AND ${table.until} >= ${table.anchorDate})`,
+    ),
+  ],
+);
+
+export type BlockSeriesRow = typeof blockSeries.$inferSelect;

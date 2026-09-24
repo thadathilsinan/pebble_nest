@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { AuthModule } from './auth/auth.module';
+import { BlocksModule } from './blocks/blocks.module';
 import { AppConfigModule } from './config/config.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
@@ -27,6 +28,7 @@ import { ZodValidationPipe } from './validation/validation.pipe';
     HealthModule,
     AuthModule,
     MeModule,
+    BlocksModule,
   ],
   providers: [
     // Registered here rather than in `main.ts` so tests built with
