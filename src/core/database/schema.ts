@@ -371,3 +371,154 @@ export const blockSeries = pgTable(
 );
 
 export type BlockSeriesRow = typeof blockSeries.$inferSelect;
+
+export const TASK_LEDGER_OUTCOMES = [
+  'completed',
+  'incomplete',
+  'missed',
+] as const;
+
+export type TaskLedgerOutcome = (typeof TASK_LEDGER_OUTCOMES)[number];
+
+/**
+ * One dated task (`Task` in `docs/api-plan.md` §1), in a block occurrence or on
+ * its date's general list. Repeating tasks add a series table later; each of
+ * their occurrences will still be one row here.
+ */
+export const tasks = pgTable(
+  'tasks',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    userId: uuid('user_id').notNull(),
+    // Null is the general list (TSK-02). Otherwise the task sits in the
+    // occurrence of this series that starts on `date`.
+    blockSeriesId: uuid('block_series_id'),
+    date: date('date', { mode: 'string' }).notNull(),
+    title: text('title').notNull(),
+    notes: text('notes').notNull().default(''),
+    // Decision 6: a reminder is a local wall-clock reading with no offset,
+    // stored as a date and minutes from its midnight like a block's start,
+    // rather than as `timestamp` (schema-conventions §3). Both or neither.
+    reminderDate: date('reminder_date', { mode: 'string' }),
+    reminderMin: smallint('reminder_min'),
+    done: boolean('done').notNull().default(false),
+    doneAt: timestamp('done_at', { withTimezone: true }),
+    // TSK-06: one more each time the task carries over.
+    carryCount: integer('carry_count').notNull().default(0),
+    // REC-06/07: recorded against its day and never carried. Only repeating
+    // tasks become missed.
+    missed: boolean('missed').notNull().default(false),
+    // schema-conventions §10: tasks are edited from more than one device.
+    version: integer('version').notNull().default(0),
+    // schema-conventions §9: POST /tasks may be retried after a lost response.
+    idempotencyKey: uuid('idempotency_key'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Cascade: decision 18 — DELETE /me stays a single delete.
+    foreignKey({
+      name: 'fk_tasks_user_id',
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+    // Set null: a task outlives its block. BLK-10 moves a deleted block's
+    // tasks to the general list, and this is that rule's floor if a series row
+    // is ever removed without the block-delete path doing it first.
+    foreignKey({
+      name: 'fk_tasks_block_series_id',
+      columns: [table.blockSeriesId],
+      foreignColumns: [blockSeries.id],
+    }).onDelete('set null'),
+    // Scoped to the owner (schema-conventions §9). It leads with `user_id`,
+    // so it is also that foreign key's index (§6).
+    uniqueIndex('uq_tasks_user_id_idempotency_key').on(
+      table.userId,
+      table.idempotencyKey,
+    ),
+    // GET /days reads a user's tasks by date range.
+    index('idx_tasks_user_id_date').on(table.userId, table.date),
+    // schema-conventions §6: for the set-null scan when a series is deleted.
+    index('idx_tasks_block_series_id').on(table.blockSeriesId),
+    // TSK-01: up to 200 characters.
+    check(
+      'ck_tasks_title_length',
+      sql`char_length(${table.title}) BETWEEN 1 AND 200 AND ${table.title} = btrim(${table.title})`,
+    ),
+    check('ck_tasks_notes_length', sql`char_length(${table.notes}) <= 10000`),
+    check(
+      'ck_tasks_reminder',
+      sql`(${table.reminderDate} IS NULL) = (${table.reminderMin} IS NULL)
+        AND (${table.reminderMin} IS NULL OR ${table.reminderMin} BETWEEN 0 AND 1439)`,
+    ),
+    // TSK-04: the completion time is recorded, and only while done.
+    check(
+      'ck_tasks_done_at',
+      sql`${table.done} = (${table.doneAt} IS NOT NULL)`,
+    ),
+    check('ck_tasks_carry_count', sql`${table.carryCount} >= 0`),
+  ],
+);
+
+export type TaskRow = typeof tasks.$inferSelect;
+
+/**
+ * What each closed day recorded about a task (the ledger, `docs/api-plan.md`
+ * §1): completed, incomplete (carried over) or missed. The dashboard counts
+ * these rows.
+ *
+ * No `updated_at`, `version` or `idempotency_key`: rows are inserted and
+ * deleted, never edited, and only ever as part of a task write.
+ */
+export const taskLedgerEntries = pgTable(
+  'task_ledger_entries',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    userId: uuid('user_id').notNull(),
+    // Null once the task is deleted: the day's record stays in the history,
+    // as it does in the app, which is why `title` is copied here.
+    taskId: uuid('task_id'),
+    day: date('day', { mode: 'string' }).notNull(),
+    outcome: text('outcome', { enum: TASK_LEDGER_OUTCOMES }).notNull(),
+    title: text('title').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Cascade: decision 18 — DELETE /me stays a single delete.
+    foreignKey({
+      name: 'fk_task_ledger_entries_user_id',
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+    // Set null: deleting a task keeps what its past days recorded.
+    foreignKey({
+      name: 'fk_task_ledger_entries_task_id',
+      columns: [table.taskId],
+      foreignColumns: [tasks.id],
+    }).onDelete('set null'),
+    // A task records one outcome per day. It leads with `task_id`, so it is
+    // also that foreign key's index (schema-conventions §6).
+    uniqueIndex('uq_task_ledger_entries_task_id_day').on(
+      table.taskId,
+      table.day,
+    ),
+    // The review reads a user's days; also the `user_id` foreign key's index.
+    index('idx_task_ledger_entries_user_id_day').on(table.userId, table.day),
+    check(
+      'ck_task_ledger_entries_outcome',
+      oneOf(sql`${table.outcome}`, TASK_LEDGER_OUTCOMES),
+    ),
+  ],
+);
+
+export type TaskLedgerEntryRow = typeof taskLedgerEntries.$inferSelect;
