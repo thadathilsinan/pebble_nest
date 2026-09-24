@@ -1,4 +1,5 @@
 import { eq } from 'drizzle-orm';
+import { BlocksRepository } from '../blocks/blocks.repository';
 import { taskLedgerEntries } from '../core/database/schema';
 import { openTestDatabase, type TestDatabase } from '../core/database/testing';
 import { UsersRepository } from '../users/users.repository';
@@ -8,6 +9,7 @@ describe('TasksRepository (integration)', () => {
   let t: TestDatabase;
   const repo = new TasksRepository();
   const users = new UsersRepository();
+  const blocks = new BlocksRepository();
 
   beforeAll(async () => {
     t = await openTestDatabase();
@@ -131,6 +133,101 @@ describe('TasksRepository (integration)', () => {
       [userId],
     );
     expect(rows).toEqual([{ task_id: null }]);
+  });
+
+  it('finds only the user’s own task', async () => {
+    const me = await newUser();
+    const other = await newUser('other@example.com');
+    const { row } = await repo.create(t.db, task(me));
+
+    const mine = await t.db.transaction((tx) =>
+      repo.findForUpdate(tx, me, row.id),
+    );
+    const theirs = await t.db.transaction((tx) =>
+      repo.findForUpdate(tx, other, row.id),
+    );
+
+    expect(mine).toEqual(row);
+    expect(theirs).toBeNull();
+  });
+
+  it('marks a task done and open again, bumping the version each time', async () => {
+    const userId = await newUser();
+    const { row } = await repo.create(t.db, task(userId));
+
+    const done = await repo.setDone(t.db, row.id, true);
+    const open = await repo.setDone(t.db, row.id, false);
+
+    expect(done).toMatchObject({ done: true, version: 1 });
+    expect(done.doneAt).toBeInstanceOf(Date);
+    expect(open).toMatchObject({
+      done: false,
+      doneAt: null,
+      version: 2,
+      date: row.date,
+    });
+  });
+
+  it('carries a reopened task to a general list in the same write', async () => {
+    const userId = await newUser();
+    const { row: series } = await blocks.create(t.db, {
+      userId,
+      name: 'Deep work',
+      anchorDate: '2026-09-21',
+      startMin: 540,
+      endMin: 600,
+      recurrenceKind: 'none',
+      weekdays: [],
+      monthDays: [],
+      until: null,
+      alert: false,
+    });
+    const { row } = await repo.create(
+      t.db,
+      task(userId, {
+        date: '2026-09-21',
+        blockSeriesId: series.id,
+        carryCount: 2,
+      }),
+    );
+    await repo.setDone(t.db, row.id, true);
+
+    const carried = await repo.setDone(t.db, row.id, false, {
+      date: '2026-09-24',
+      days: 3,
+    });
+
+    expect(carried).toMatchObject({
+      date: '2026-09-24',
+      blockSeriesId: null,
+      carryCount: 5,
+      version: 2,
+    });
+  });
+
+  it('records a completed day, replacing what the day held', async () => {
+    const userId = await newUser();
+    const { row } = await repo.create(t.db, task(userId));
+    await repo.recordIncomplete(t.db, row, row.date, row.date);
+
+    await repo.recordCompleted(t.db, row);
+
+    expect(
+      (await ledgerOf(row.id)).map(({ day, outcome }) => ({ day, outcome })),
+    ).toEqual([{ day: row.date, outcome: 'completed' }]);
+  });
+
+  it('clears one day of a task’s record', async () => {
+    const userId = await newUser();
+    const { row } = await repo.create(t.db, task(userId));
+    await repo.recordIncomplete(t.db, row, '2026-09-22', '2026-09-24');
+
+    await repo.clearDay(t.db, row.id, '2026-09-24');
+
+    expect((await ledgerOf(row.id)).map((e) => e.day)).toEqual([
+      '2026-09-22',
+      '2026-09-23',
+    ]);
   });
 
   it('reads only the user’s tasks in the range', async () => {

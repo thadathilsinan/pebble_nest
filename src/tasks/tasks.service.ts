@@ -16,6 +16,7 @@ import type { BlockSeriesRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
 import { UsersRepository } from '../users/users.repository';
 import type { CreateTaskBody } from './dto/create-task.dto';
+import type { SetTaskDoneBody } from './dto/set-task-done.dto';
 import { toTask, type Task } from './tasks.mapper';
 import { TasksRepository } from './tasks.repository';
 
@@ -78,10 +79,7 @@ export class TasksService {
       });
     }
 
-    const user = await this.users.findById(this.db, caller.userId);
-    if (user === null) throw accessTokenInvalid();
-
-    const today = todayIn(user.timeZone ?? FALLBACK_TIME_ZONE);
+    const today = await this.todayFor(caller);
     const closed = body.date < today;
 
     const row = await this.db.transaction(async (tx) => {
@@ -111,6 +109,69 @@ export class TasksService {
     });
 
     return toTask(row);
+  }
+
+  /**
+   * Marks a task done or open again (TSK-04). Done stamps `doneAt` and records
+   * the task completed on its day; open again removes that record.
+   *
+   * A task reopened on a day that has already closed is carried forward at
+   * once (decision 2), as `create` carries one put there: to today's general
+   * list, with one carry and one `incomplete` entry per closed day.
+   *
+   * Sending the value the task already has changes nothing, not even
+   * `version`. It does not read the session (decision 16).
+   */
+  async setDone(
+    caller: Caller,
+    id: string,
+    body: SetTaskDoneBody,
+  ): Promise<Task> {
+    const today = await this.todayFor(caller);
+
+    const row = await this.db.transaction(async (tx) => {
+      const task = await this.tasks.findForUpdate(tx, caller.userId, id);
+      if (task === null) {
+        throw new NotFoundException({
+          code: 'NOT_FOUND' satisfies ErrorCode,
+          message: 'No such task.',
+        });
+      }
+      if (task.done === body.done) return task;
+
+      if (body.done) {
+        const done = await this.tasks.setDone(tx, task.id, true);
+        await this.tasks.recordCompleted(tx, done);
+        return done;
+      }
+
+      await this.tasks.clearDay(tx, task.id, task.date);
+      if (task.date >= today) return this.tasks.setDone(tx, task.id, false);
+
+      const carried = await this.tasks.setDone(tx, task.id, false, {
+        date: today,
+        days: daysBetween(task.date, today),
+      });
+      await this.tasks.recordIncomplete(
+        tx,
+        carried,
+        task.date,
+        addDays(today, -1),
+      );
+      return carried;
+    });
+
+    return toTask(row);
+  }
+
+  /**
+   * Today in the caller's time zone: every day before it has closed. A token
+   * whose account is gone is refused here.
+   */
+  private async todayFor(caller: Caller): Promise<string> {
+    const user = await this.users.findById(this.db, caller.userId);
+    if (user === null) throw accessTokenInvalid();
+    return todayIn(user.timeZone ?? FALLBACK_TIME_ZONE);
   }
 }
 

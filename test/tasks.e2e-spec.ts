@@ -28,10 +28,12 @@ class FakeMailer implements Mailer {
 
 type Task = {
   id: string;
+  version: number;
   title: string;
   date: string;
   blockSeriesId: string | null;
   done: boolean;
+  doneAt: string | null;
   carryCount: number;
 };
 type Occurrence = {
@@ -440,6 +442,265 @@ describe('POST /tasks (e2e)', () => {
       .expect(204);
 
     const res = await postTask({ title: 'A', date: future }).expect(401);
+    expect(codeOf(res.body)).toBe('TOKEN_INVALID');
+  });
+});
+
+describe('PATCH /tasks/{id}/done (e2e)', () => {
+  let app: NestExpressApplication;
+  let pool: Pool;
+  let mailer: FakeMailer;
+  let accessToken: string;
+  let future: string;
+
+  beforeEach(async () => {
+    mailer = new FakeMailer();
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(MAILER)
+      .useValue(mailer)
+      .compile();
+
+    app = moduleFixture.createNestApplication<NestExpressApplication>({
+      bodyParser: false,
+    });
+    configureApp(app, moduleFixture.get<Env>(ENV));
+    await app.init();
+
+    pool = moduleFixture.get<Pool>(POOL);
+    await pool.query(
+      'TRUNCATE users, sessions, session_refresh_tokens, email_sign_in_codes, block_series, tasks, task_ledger_entries RESTART IDENTITY CASCADE',
+    );
+    accessToken = await signIn('me@example.com');
+    future = addDays(todayIn('UTC'), 3);
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  function http() {
+    return request(app.getHttpServer());
+  }
+
+  async function signIn(email: string): Promise<string> {
+    await http().post('/api/v1/auth/email/code').send({ email }).expect(204);
+    const res = await http()
+      .post('/api/v1/auth/email/verify')
+      .send({ email, code: mailer.lastCodeFor(email) })
+      .expect(200);
+    return (res.body as { data: { accessToken: string } }).data.accessToken;
+  }
+
+  async function createTask(body: object): Promise<Task> {
+    const res = await http()
+      .post('/api/v1/tasks')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send(body)
+      .expect(201);
+    return (res.body as { data: Task }).data;
+  }
+
+  function patchDone(id: string, body: object, token = accessToken) {
+    return http()
+      .patch(`/api/v1/tasks/${id}/done`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body);
+  }
+
+  async function setDone(id: string, done: boolean): Promise<Task> {
+    const res = await patchDone(id, { done }).expect(200);
+    return (res.body as { data: Task }).data;
+  }
+
+  async function getDay(date: string): Promise<Day> {
+    const res = await http()
+      .get(`/api/v1/days/${date}`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    return (res.body as { data: Day }).data;
+  }
+
+  async function setTimeZone(timeZone: string) {
+    await http()
+      .patch('/api/v1/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ timeZone })
+      .expect(200);
+  }
+
+  async function ledger(): Promise<{ day: string; outcome: string }[]> {
+    const { rows } = await pool.query<{ day: string; outcome: string }>(
+      "SELECT to_char(day, 'YYYY-MM-DD') AS day, outcome FROM task_ledger_entries ORDER BY day",
+    );
+    return rows;
+  }
+
+  function codeOf(body: unknown): string {
+    return (body as Failure).error.code;
+  }
+
+  it('marks a task done and records the day completed', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    const done = await setDone(task.id, true);
+
+    expect(done).toMatchObject({ done: true, version: 1, date: future });
+    expect(Date.parse(done.doneAt ?? '')).not.toBeNaN();
+    expect(await ledger()).toEqual([{ day: future, outcome: 'completed' }]);
+    expect((await getDay(future)).generalList).toEqual([done]);
+  });
+
+  it('marks a task open again and removes the record', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    await setDone(task.id, true);
+
+    const open = await setDone(task.id, false);
+
+    expect(open).toMatchObject({
+      done: false,
+      doneAt: null,
+      version: 2,
+      date: future,
+      carryCount: 0,
+    });
+    expect(await ledger()).toEqual([]);
+  });
+
+  it('changes nothing when the task already has that value', async () => {
+    const open = await createTask({ title: 'A', date: future });
+    const task = await createTask({ title: 'B', date: future });
+    const done = await setDone(task.id, true);
+
+    expect(await setDone(open.id, false)).toEqual(open);
+    expect(await setDone(task.id, true)).toEqual(done);
+    expect(await ledger()).toEqual([{ day: future, outcome: 'completed' }]);
+  });
+
+  it('carries a task reopened on a closed day forward to today', async () => {
+    await setTimeZone(BEHIND);
+    const date = todayIn(BEHIND);
+    const task = await createTask({ title: 'A', date });
+    await setDone(task.id, true);
+    await setTimeZone(AHEAD);
+    const today = todayIn(AHEAD);
+    const days = daysBetween(date, today);
+
+    const open = await setDone(task.id, false);
+
+    expect(open).toMatchObject({
+      done: false,
+      date: today,
+      blockSeriesId: null,
+      carryCount: days,
+    });
+    expect(await ledger()).toEqual(
+      Array.from({ length: days }, (_, i) => ({
+        day: addDays(date, i),
+        outcome: 'incomplete',
+      })),
+    );
+    expect((await getDay(today)).generalList).toEqual([open]);
+    expect((await getDay(date)).generalList).toEqual([]);
+  });
+
+  it('keeps earlier carries when a carried task is done then reopened', async () => {
+    await setTimeZone(AHEAD);
+    const today = todayIn(AHEAD);
+    const past = addDays(today, -2);
+    const task = await createTask({ title: 'A', date: past });
+    await setDone(task.id, true);
+
+    const open = await setDone(task.id, false);
+
+    // Reopened on the day it now sits on, which has not closed.
+    expect(open).toMatchObject({ date: today, carryCount: 2 });
+    expect(await ledger()).toEqual([
+      { day: past, outcome: 'incomplete' },
+      { day: addDays(past, 1), outcome: 'incomplete' },
+    ]);
+  });
+
+  it('takes a task out of its block when it carries', async () => {
+    await setTimeZone(BEHIND);
+    const date = todayIn(BEHIND);
+    const block = await http()
+      .post('/api/v1/blocks')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({
+        name: 'Deep work',
+        date,
+        startMin: 540,
+        endMin: 600,
+        alert: false,
+      })
+      .expect(201);
+    const seriesId = (block.body as { data: { seriesId: string } }).data
+      .seriesId;
+    const task = await createTask({
+      title: 'A',
+      date,
+      blockSeriesId: seriesId,
+    });
+    await setDone(task.id, true);
+    await setTimeZone(AHEAD);
+
+    const open = await setDone(task.id, false);
+
+    expect(open.blockSeriesId).toBeNull();
+    expect((await getDay(date)).blocks).toMatchObject([{ tasks: [] }]);
+  });
+
+  it('refuses bad input', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    for (const [id, body] of [
+      ['not-a-uuid', { done: true }],
+      [task.id, {}],
+      [task.id, { done: 'yes' }],
+      [task.id, { done: true, version: 0 }],
+    ] as const) {
+      const res = await patchDone(id, body).expect(400);
+      expect(codeOf(res.body)).toBe('VALIDATION_FAILED');
+    }
+  });
+
+  it('answers 404 for an unknown task or someone else’s', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const them = await signIn('them@example.com');
+
+    for (const [id, token] of [
+      ['0192a000-0000-7000-8000-000000000009', accessToken],
+      [task.id, them],
+    ] as const) {
+      const res = await patchDone(id, { done: true }, token).expect(404);
+      expect(codeOf(res.body)).toBe('NOT_FOUND');
+    }
+    expect(await ledger()).toEqual([]);
+  });
+
+  it('writes one record when two devices tick at once', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    const results = await Promise.all([
+      setDone(task.id, true),
+      setDone(task.id, true),
+    ]);
+
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0].version).toBe(1);
+    expect(await ledger()).toEqual([{ day: future, outcome: 'completed' }]);
+  });
+
+  it('refuses a token whose account is gone', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    await http()
+      .delete('/api/v1/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+
+    const res = await patchDone(task.id, { done: true }).expect(401);
     expect(codeOf(res.body)).toBe('TOKEN_INVALID');
   });
 });

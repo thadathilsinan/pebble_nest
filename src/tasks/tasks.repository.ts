@@ -84,6 +84,88 @@ export class TasksRepository {
   }
 
   /**
+   * The caller's task, locked until the transaction ends so two devices
+   * toggling it at once take turns. `null` when there is no such task or it
+   * is someone else's.
+   */
+  async findForUpdate(
+    ex: Executor,
+    userId: string,
+    id: string,
+  ): Promise<TaskRow | null> {
+    const [row] = await ex
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.userId, userId), eq(tasks.id, id)))
+      .limit(1)
+      .for('update');
+    return row ?? null;
+  }
+
+  /**
+   * Marks the task done, stamping `doneAt` with the database's clock, or
+   * open again. A reopened task on a closed day is `carry`-ed in the same
+   * write: to `carry.date`'s general list, `carry.days` carries further on.
+   * Bumps `version` once either way. The caller has checked `done` changes.
+   */
+  async setDone(
+    ex: Executor,
+    id: string,
+    done: boolean,
+    carry?: { date: string; days: number },
+  ): Promise<TaskRow> {
+    const [row] = await ex
+      .update(tasks)
+      .set({
+        done,
+        doneAt: done ? sql`now()` : null,
+        version: sql`${tasks.version} + 1`,
+        ...(carry && {
+          date: carry.date,
+          blockSeriesId: null,
+          carryCount: sql`${tasks.carryCount} + ${carry.days}`,
+        }),
+      })
+      .where(eq(tasks.id, id))
+      .returning();
+
+    if (row === undefined) throw new Error('task vanished while locked');
+    return row;
+  }
+
+  /**
+   * Records `task` completed on the day it sits on (TSK-04), replacing
+   * whatever that day held for it.
+   */
+  async recordCompleted(ex: Executor, task: TaskRow): Promise<void> {
+    await ex
+      .insert(taskLedgerEntries)
+      .values({
+        userId: task.userId,
+        taskId: task.id,
+        day: task.date,
+        outcome: 'completed',
+        title: task.title,
+      })
+      .onConflictDoUpdate({
+        target: [taskLedgerEntries.taskId, taskLedgerEntries.day],
+        set: { outcome: 'completed', title: task.title },
+      });
+  }
+
+  /** Removes what `day` recorded for the task, if anything. */
+  async clearDay(ex: Executor, taskId: string, day: string): Promise<void> {
+    await ex
+      .delete(taskLedgerEntries)
+      .where(
+        and(
+          eq(taskLedgerEntries.taskId, taskId),
+          eq(taskLedgerEntries.day, day),
+        ),
+      );
+  }
+
+  /**
    * The user's tasks dated from `from` to `to`, both included, in no
    * particular order. Uses `idx_tasks_user_id_date`.
    */

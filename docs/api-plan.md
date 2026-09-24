@@ -247,7 +247,7 @@ Screen: task slip.
 |---|---|---|---|
 | POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built for one-offs.** See below. |
 | PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` |
-| PATCH | `/tasks/{id}/done` | `{ done }` | `Task` |
+| PATCH | `/tasks/{id}/done` | `{ done }` | `Task` (200). **Built.** See below. |
 | POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` |
 | DELETE | `/tasks/{id}` | `?scope=onlyThis\|series` | 204 |
 
@@ -313,6 +313,27 @@ that has already closed is carried forward right away.
 - A retry with the same `idempotencyKey` returns the original with 201 and
   writes no ledger entries of its own (decision 19). A deleted account's token
   gets `401 TOKEN_INVALID`. It does not read the session (decision 16).
+
+**Done (built):**
+
+- `{ done }` only, strict, with no `version`: it sets an absolute value, so the
+  last write wins and a retry is harmless (decision 24). A real change bumps
+  `version`, so another device's stale `PATCH /tasks/{id}` gets its 409.
+  Sending the value the task already has returns it unchanged, `version` and
+  `doneAt` included.
+- Done stamps `doneAt` with the database's clock and records the task
+  `completed` on the day it sits on, replacing anything that day held for it.
+  Open again clears `doneAt` and removes that day's entry. This happens on the
+  write, for today and future days too, as the app does.
+- Reopened on a closed day, the task carries forward as a closed-day create
+  does: to today's general list, `carryCount` up by the days passed, and an
+  `incomplete` entry for each closed day from its date to yesterday.
+- The task row is locked for the write, so two devices ticking at once write
+  one entry. An id that isn't a UUID is `400 VALIDATION_FAILED`; an unknown
+  task, or someone else's, is `404 NOT_FOUND`. A deleted account's token gets
+  `401 TOKEN_INVALID`. It does not read the session (decision 16).
+- Missed tasks only come from repeats, so whether one can be ticked is left to
+  the task series slice.
 
 ## 6. Notifications (NTF)
 
@@ -428,6 +449,7 @@ request turns out to be slow.
 | 21 | `GET /days` expands recurrences in memory from one query per request, and the range form ships with the single-day form. A block's midnight tail is listed on the following day with its start `date`. |
 | 22 | Until the day-end job keeps a record of the last day it closed, a day is closed once it is before today in the user's time zone (UTC before the device reports one). Closed-day carry is computed on the write: the task lands on today's general list, and the ledger gets one `incomplete` row per day it passed through, written with `generate_series`, so even a date decades back is one statement. |
 | 23 | `POST /tasks` shipped with one-offs only. A repeat the rules allow answers `501 NOT_IMPLEMENTED`, not `REPEAT_NOT_ALLOWED`, so that code keeps one meaning: the repeat doesn't fit where the task sits. |
+| 24 | `PATCH /tasks/{id}/done` carries no `version` and is last-write-wins, since `done` is an absolute value. The `completed` ledger entry is written on the tick itself, not when the day closes, matching the app. Reopening on a closed day carries the task at once (decision 2). |
 
 ## 11. Error codes to add
 
