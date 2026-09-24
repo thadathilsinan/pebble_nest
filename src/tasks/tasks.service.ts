@@ -17,6 +17,7 @@ import type { BlockSeriesRow, TaskRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
 import { UsersRepository } from '../users/users.repository';
 import type { CreateTaskBody } from './dto/create-task.dto';
+import type { MoveTaskBody } from './dto/move-task.dto';
 import type { SetTaskDoneBody } from './dto/set-task-done.dto';
 import type { UpdateTaskBody } from './dto/update-task.dto';
 import { toTask, type Task } from './tasks.mapper';
@@ -198,6 +199,85 @@ export class TasksService {
     });
 
     return toTask(row);
+  }
+
+  /**
+   * Moves a task between blocks, to the general list, or to another date
+   * (TSK-03). Its tasks-in-a-block rule is create's: the block must be the
+   * caller's and fall on `date`.
+   *
+   * A done task takes its `completed` entry with it, so the day it now sits
+   * on is the day it counts for. An open task moved onto a day that has
+   * already closed is carried forward at once, as `create` carries one put
+   * there (decision 2). Days it had already carried through keep the entry
+   * they have.
+   *
+   * No `version`: the last write wins, and a real move bumps `version`.
+   * Moving a task to where it already is changes nothing. It does not read
+   * the session (decision 16).
+   */
+  async move(caller: Caller, id: string, body: MoveTaskBody): Promise<Task> {
+    const today = await this.todayFor(caller);
+
+    const row = await this.db.transaction(async (tx) => {
+      const task = await this.tasks.findForUpdate(tx, caller.userId, id);
+      if (task === null) throw taskNotFound();
+      if (body.blockSeriesId !== null) {
+        assertOccursOn(
+          await this.blocks.findById(tx, caller.userId, body.blockSeriesId),
+          body.date,
+        );
+      }
+      if (
+        task.date === body.date &&
+        task.blockSeriesId === body.blockSeriesId
+      ) {
+        return task;
+      }
+
+      if (task.done) {
+        await this.tasks.clearDay(tx, task.id, task.date);
+        const moved = await this.tasks.move(tx, task.id, {
+          ...body,
+          carryDays: 0,
+        });
+        await this.tasks.recordCompleted(tx, moved);
+        return moved;
+      }
+
+      if (body.date >= today) {
+        return this.tasks.move(tx, task.id, { ...body, carryDays: 0 });
+      }
+
+      const carried = await this.tasks.move(tx, task.id, {
+        date: today,
+        blockSeriesId: null,
+        carryDays: daysBetween(body.date, today),
+      });
+      await this.tasks.recordIncomplete(
+        tx,
+        carried,
+        body.date,
+        addDays(today, -1),
+      );
+      return carried;
+    });
+
+    return toTask(row);
+  }
+
+  /**
+   * Deletes a task. It never comes back, and the days it recorded stay in the
+   * ledger under its title, so the dashboard is unchanged. A retry after a
+   * lost response is a 404.
+   *
+   * It reads no user row, as `update` doesn't, so a token whose account is
+   * gone gets 404. It does not read the session (decision 16).
+   */
+  async delete(caller: Caller, id: string): Promise<void> {
+    if (!(await this.tasks.delete(this.db, caller.userId, id))) {
+      throw taskNotFound();
+    }
   }
 
   /**

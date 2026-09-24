@@ -1014,3 +1014,426 @@ describe('PATCH /tasks/{id} (e2e)', () => {
     expect(statuses).toEqual([200, 409]);
   });
 });
+
+describe('POST /tasks/{id}/move (e2e)', () => {
+  let app: NestExpressApplication;
+  let pool: Pool;
+  let mailer: FakeMailer;
+  let accessToken: string;
+  let future: string;
+
+  beforeEach(async () => {
+    mailer = new FakeMailer();
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(MAILER)
+      .useValue(mailer)
+      .compile();
+
+    app = moduleFixture.createNestApplication<NestExpressApplication>({
+      bodyParser: false,
+    });
+    configureApp(app, moduleFixture.get<Env>(ENV));
+    await app.init();
+
+    pool = moduleFixture.get<Pool>(POOL);
+    await pool.query(
+      'TRUNCATE users, sessions, session_refresh_tokens, email_sign_in_codes, block_series, tasks, task_ledger_entries RESTART IDENTITY CASCADE',
+    );
+    accessToken = await signIn('me@example.com');
+    future = addDays(todayIn('UTC'), 3);
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  function http() {
+    return request(app.getHttpServer());
+  }
+
+  async function signIn(email: string): Promise<string> {
+    await http().post('/api/v1/auth/email/code').send({ email }).expect(204);
+    const res = await http()
+      .post('/api/v1/auth/email/verify')
+      .send({ email, code: mailer.lastCodeFor(email) })
+      .expect(200);
+    return (res.body as { data: { accessToken: string } }).data.accessToken;
+  }
+
+  async function createTask(body: object): Promise<Task> {
+    const res = await http()
+      .post('/api/v1/tasks')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send(body)
+      .expect(201);
+    return (res.body as { data: Task }).data;
+  }
+
+  async function createBlock(date: string, token = accessToken) {
+    const res = await http()
+      .post('/api/v1/blocks')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: 'Deep work',
+        date,
+        startMin: 540,
+        endMin: 600,
+        alert: false,
+      })
+      .expect(201);
+    return (res.body as { data: { seriesId: string } }).data.seriesId;
+  }
+
+  function postMove(id: string, body: object, token = accessToken) {
+    return http()
+      .post(`/api/v1/tasks/${id}/move`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body);
+  }
+
+  async function move(id: string, body: object): Promise<Task> {
+    const res = await postMove(id, body).expect(200);
+    return (res.body as { data: Task }).data;
+  }
+
+  async function setDone(id: string) {
+    await http()
+      .patch(`/api/v1/tasks/${id}/done`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ done: true })
+      .expect(200);
+  }
+
+  async function getDay(date: string): Promise<Day> {
+    const res = await http()
+      .get(`/api/v1/days/${date}`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    return (res.body as { data: Day }).data;
+  }
+
+  async function setTimeZone(timeZone: string) {
+    await http()
+      .patch('/api/v1/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ timeZone })
+      .expect(200);
+  }
+
+  async function ledger(): Promise<{ day: string; outcome: string }[]> {
+    const { rows } = await pool.query<{ day: string; outcome: string }>(
+      "SELECT to_char(day, 'YYYY-MM-DD') AS day, outcome FROM task_ledger_entries ORDER BY day",
+    );
+    return rows;
+  }
+
+  function codeOf(body: unknown): string {
+    return (body as Failure).error.code;
+  }
+
+  it('moves a task into a block and to another date’s general list', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const later = addDays(future, 1);
+    const seriesId = await createBlock(later);
+
+    const inBlock = await move(task.id, {
+      date: later,
+      blockSeriesId: seriesId,
+    });
+    const onList = await move(task.id, { date: future, blockSeriesId: null });
+
+    expect(inBlock).toMatchObject({
+      date: later,
+      blockSeriesId: seriesId,
+      version: 1,
+      carryCount: 0,
+    });
+    expect(onList).toMatchObject({
+      date: future,
+      blockSeriesId: null,
+      version: 2,
+    });
+    expect((await getDay(future)).generalList).toEqual([onList]);
+    expect((await getDay(later)).blocks).toMatchObject([{ tasks: [] }]);
+  });
+
+  it('changes nothing, not even the version, for a move to where it is', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    expect(await move(task.id, { date: future, blockSeriesId: null })).toEqual(
+      task,
+    );
+  });
+
+  it('takes a done task’s completed entry with it', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    await setDone(task.id);
+    const later = addDays(future, 1);
+
+    const moved = await move(task.id, { date: later, blockSeriesId: null });
+
+    expect(moved).toMatchObject({ date: later, done: true, version: 2 });
+    expect(await ledger()).toEqual([{ day: later, outcome: 'completed' }]);
+  });
+
+  it('leaves a done task on the closed day it is moved to', async () => {
+    await setTimeZone(AHEAD);
+    const past = addDays(todayIn(AHEAD), -2);
+    const task = await createTask({ title: 'A', date: future });
+    await setDone(task.id);
+
+    const moved = await move(task.id, { date: past, blockSeriesId: null });
+
+    expect(moved).toMatchObject({ date: past, done: true, carryCount: 0 });
+    expect(await ledger()).toEqual([{ day: past, outcome: 'completed' }]);
+  });
+
+  it('carries an open task moved onto a closed day forward to today', async () => {
+    await setTimeZone(AHEAD);
+    const today = todayIn(AHEAD);
+    const past = addDays(today, -2);
+    const seriesId = await createBlock(past);
+    const task = await createTask({ title: 'A', date: future });
+
+    const moved = await move(task.id, { date: past, blockSeriesId: seriesId });
+
+    expect(moved).toMatchObject({
+      date: today,
+      blockSeriesId: null,
+      carryCount: 2,
+      version: 1,
+    });
+    expect(await ledger()).toEqual([
+      { day: past, outcome: 'incomplete' },
+      { day: addDays(past, 1), outcome: 'incomplete' },
+    ]);
+    expect((await getDay(today)).generalList).toEqual([moved]);
+    expect((await getDay(past)).blocks).toMatchObject([{ tasks: [] }]);
+  });
+
+  it('records each day once when a task is moved back through days it carried', async () => {
+    await setTimeZone(AHEAD);
+    const today = todayIn(AHEAD);
+    const past = addDays(today, -2);
+    const task = await createTask({ title: 'A', date: past });
+
+    const moved = await move(task.id, { date: past, blockSeriesId: null });
+
+    // Its carries count moves, so it carried twice more.
+    expect(moved).toMatchObject({ date: today, carryCount: 4, version: 1 });
+    expect(await ledger()).toEqual([
+      { day: past, outcome: 'incomplete' },
+      { day: addDays(past, 1), outcome: 'incomplete' },
+    ]);
+  });
+
+  it('refuses bad input', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    for (const [id, body] of [
+      ['not-a-uuid', { date: future, blockSeriesId: null }],
+      [task.id, {}],
+      [task.id, { date: future }],
+      [task.id, { blockSeriesId: null }],
+      [task.id, { date: '2026-02-30', blockSeriesId: null }],
+      [task.id, { date: future, blockSeriesId: 'nope' }],
+      [task.id, { date: future, blockSeriesId: null, version: 0 }],
+    ] as const) {
+      const res = await postMove(id, body).expect(400);
+      expect(codeOf(res.body)).toBe('VALIDATION_FAILED');
+    }
+  });
+
+  it('refuses a block that is not the caller’s, or not on that date', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const them = await signIn('them@example.com');
+    const theirs = await createBlock(future, them);
+    const mine = await createBlock(future);
+
+    const notMine = await postMove(task.id, {
+      date: future,
+      blockSeriesId: theirs,
+    }).expect(404);
+    const notOnDate = await postMove(task.id, {
+      date: addDays(future, 1),
+      blockSeriesId: mine,
+    }).expect(422);
+
+    expect(codeOf(notMine.body)).toBe('NOT_FOUND');
+    expect(codeOf(notOnDate.body)).toBe('BLOCK_NOT_ON_DATE');
+  });
+
+  it('answers 404 for an unknown task or someone else’s', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const them = await signIn('them@example.com');
+    const body = { date: addDays(future, 1), blockSeriesId: null };
+
+    for (const [id, token] of [
+      ['0192a000-0000-7000-8000-000000000009', accessToken],
+      [task.id, them],
+    ] as const) {
+      const res = await postMove(id, body, token).expect(404);
+      expect(codeOf(res.body)).toBe('NOT_FOUND');
+    }
+    expect((await getDay(future)).generalList).toEqual([task]);
+  });
+
+  it('refuses a token whose account is gone', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    await http()
+      .delete('/api/v1/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+
+    const res = await postMove(task.id, {
+      date: future,
+      blockSeriesId: null,
+    }).expect(401);
+    expect(codeOf(res.body)).toBe('TOKEN_INVALID');
+  });
+});
+
+describe('DELETE /tasks/{id} (e2e)', () => {
+  let app: NestExpressApplication;
+  let pool: Pool;
+  let mailer: FakeMailer;
+  let accessToken: string;
+  let future: string;
+
+  beforeEach(async () => {
+    mailer = new FakeMailer();
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(MAILER)
+      .useValue(mailer)
+      .compile();
+
+    app = moduleFixture.createNestApplication<NestExpressApplication>({
+      bodyParser: false,
+    });
+    configureApp(app, moduleFixture.get<Env>(ENV));
+    await app.init();
+
+    pool = moduleFixture.get<Pool>(POOL);
+    await pool.query(
+      'TRUNCATE users, sessions, session_refresh_tokens, email_sign_in_codes, block_series, tasks, task_ledger_entries RESTART IDENTITY CASCADE',
+    );
+    accessToken = await signIn('me@example.com');
+    future = addDays(todayIn('UTC'), 3);
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  function http() {
+    return request(app.getHttpServer());
+  }
+
+  async function signIn(email: string): Promise<string> {
+    await http().post('/api/v1/auth/email/code').send({ email }).expect(204);
+    const res = await http()
+      .post('/api/v1/auth/email/verify')
+      .send({ email, code: mailer.lastCodeFor(email) })
+      .expect(200);
+    return (res.body as { data: { accessToken: string } }).data.accessToken;
+  }
+
+  async function createTask(body: object): Promise<Task> {
+    const res = await http()
+      .post('/api/v1/tasks')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send(body)
+      .expect(201);
+    return (res.body as { data: Task }).data;
+  }
+
+  function deleteTask(id: string, query = '', token = accessToken) {
+    return http()
+      .delete(`/api/v1/tasks/${id}${query}`)
+      .set('Authorization', `Bearer ${token}`);
+  }
+
+  async function getDay(date: string): Promise<Day> {
+    const res = await http()
+      .get(`/api/v1/days/${date}`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    return (res.body as { data: Day }).data;
+  }
+
+  function codeOf(body: unknown): string {
+    return (body as Failure).error.code;
+  }
+
+  it('deletes a task, and a retry is a 404', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const other = await createTask({ title: 'B', date: future });
+
+    const res = await deleteTask(task.id).expect(204);
+
+    expect(res.text).toBe('');
+    expect((await getDay(future)).generalList).toEqual([other]);
+    const again = await deleteTask(task.id).expect(404);
+    expect(codeOf(again.body)).toBe('NOT_FOUND');
+  });
+
+  it('keeps the days the task recorded, under its title', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    await http()
+      .patch(`/api/v1/tasks/${task.id}/done`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ done: true })
+      .expect(200);
+
+    await deleteTask(task.id).expect(204);
+
+    const { rows } = await pool.query<{
+      task_id: string | null;
+      title: string;
+    }>('SELECT task_id, title FROM task_ledger_entries');
+    expect(rows).toEqual([{ task_id: null, title: 'A' }]);
+  });
+
+  it('takes either scope for a task that does not repeat', async () => {
+    const a = await createTask({ title: 'A', date: future });
+    const b = await createTask({ title: 'B', date: future });
+
+    await deleteTask(a.id, '?scope=onlyThis').expect(204);
+    await deleteTask(b.id, '?scope=series').expect(204);
+
+    expect((await getDay(future)).generalList).toEqual([]);
+  });
+
+  it('refuses bad input', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    for (const [id, query] of [
+      ['not-a-uuid', ''],
+      [task.id, '?scope=all'],
+    ] as const) {
+      const res = await deleteTask(id, query).expect(400);
+      expect(codeOf(res.body)).toBe('VALIDATION_FAILED');
+    }
+    expect((await getDay(future)).generalList).toEqual([task]);
+  });
+
+  it('answers 404 for someone else’s task or a deleted account', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const them = await signIn('them@example.com');
+
+    const theirs = await deleteTask(task.id, '', them).expect(404);
+    expect(codeOf(theirs.body)).toBe('NOT_FOUND');
+    expect((await getDay(future)).generalList).toEqual([task]);
+
+    await http()
+      .delete('/api/v1/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+    const gone = await deleteTask(task.id).expect(404);
+    expect(codeOf(gone.body)).toBe('NOT_FOUND');
+  });
+});

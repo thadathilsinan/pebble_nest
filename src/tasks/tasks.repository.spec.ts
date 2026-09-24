@@ -121,6 +121,26 @@ describe('TasksRepository (integration)', () => {
     expect(await ledgerOf(row.id)).toHaveLength(46_287);
   });
 
+  it('leaves a day that already recorded the task as it was', async () => {
+    const userId = await newUser();
+    const { row } = await repo.create(
+      t.db,
+      task(userId, { date: '2026-09-22' }),
+    );
+    await repo.recordCompleted(t.db, row);
+    await repo.recordIncomplete(t.db, row, '2026-09-21', '2026-09-21');
+
+    await repo.recordIncomplete(t.db, row, '2026-09-21', '2026-09-23');
+
+    expect(
+      (await ledgerOf(row.id)).map(({ day, outcome }) => ({ day, outcome })),
+    ).toEqual([
+      { day: '2026-09-21', outcome: 'incomplete' },
+      { day: '2026-09-22', outcome: 'completed' },
+      { day: '2026-09-23', outcome: 'incomplete' },
+    ]);
+  });
+
   it('keeps the ledger when the task is deleted', async () => {
     const userId = await newUser();
     const { row } = await repo.create(t.db, task(userId));
@@ -267,6 +287,57 @@ describe('TasksRepository (integration)', () => {
       '2026-09-22',
       '2026-09-23',
     ]);
+  });
+
+  it('moves a task, adding carries and bumping the version once', async () => {
+    const userId = await newUser();
+    const { row: series } = await blocks.create(t.db, {
+      userId,
+      name: 'Deep work',
+      anchorDate: '2026-09-25',
+      startMin: 540,
+      endMin: 600,
+      recurrenceKind: 'none',
+      weekdays: [],
+      monthDays: [],
+      until: null,
+      alert: false,
+    });
+    const { row } = await repo.create(t.db, task(userId, { carryCount: 1 }));
+
+    const inBlock = await repo.move(t.db, row.id, {
+      date: '2026-09-25',
+      blockSeriesId: series.id,
+      carryDays: 0,
+    });
+    const carried = await repo.move(t.db, row.id, {
+      date: '2026-09-24',
+      blockSeriesId: null,
+      carryDays: 2,
+    });
+
+    expect(inBlock).toMatchObject({
+      date: '2026-09-25',
+      blockSeriesId: series.id,
+      carryCount: 1,
+      version: 1,
+    });
+    expect(carried).toMatchObject({
+      date: '2026-09-24',
+      blockSeriesId: null,
+      carryCount: 3,
+      version: 2,
+    });
+  });
+
+  it('deletes only the user’s own task', async () => {
+    const me = await newUser();
+    const other = await newUser('other@example.com');
+    const { row } = await repo.create(t.db, task(me));
+
+    expect(await repo.delete(t.db, other, row.id)).toBe(false);
+    expect(await repo.delete(t.db, me, row.id)).toBe(true);
+    expect(await repo.delete(t.db, me, row.id)).toBe(false);
   });
 
   it('reads only the user’s tasks in the range', async () => {

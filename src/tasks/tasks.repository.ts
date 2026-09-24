@@ -73,6 +73,10 @@ export class TasksRepository {
    * One statement over `generate_series` rather than a row per day from here,
    * because a task put years in the past needs thousands of rows, more than
    * one statement's bind parameters allow.
+   *
+   * A day that already holds an entry for the task keeps it. That happens
+   * when a task is moved back onto days it has already carried through, and
+   * each day records the task once.
    */
   async recordIncomplete(
     ex: Executor,
@@ -85,6 +89,7 @@ export class TasksRepository {
         (user_id, task_id, day, outcome, title)
       SELECT ${task.userId}, ${task.id}, day::date, 'incomplete', ${task.title}
       FROM generate_series(${from}::date, ${to}::date, interval '1 day') AS day
+      ON CONFLICT (task_id, day) DO NOTHING
     `);
   }
 
@@ -191,6 +196,44 @@ export class TasksRepository {
       .update(taskLedgerEntries)
       .set({ title })
       .where(eq(taskLedgerEntries.taskId, taskId));
+  }
+
+  /**
+   * Puts the task on `to.date`, in `to.blockSeriesId`'s occurrence or on the
+   * general list, and bumps `version` once. `carryDays` adds carries, for a
+   * task moved onto a closed day and carried on from there. The caller holds
+   * the row's lock and has checked the place changes.
+   */
+  async move(
+    ex: Executor,
+    id: string,
+    to: { date: string; blockSeriesId: string | null; carryDays: number },
+  ): Promise<TaskRow> {
+    const [row] = await ex
+      .update(tasks)
+      .set({
+        date: to.date,
+        blockSeriesId: to.blockSeriesId,
+        carryCount: sql`${tasks.carryCount} + ${to.carryDays}`,
+        version: sql`${tasks.version} + 1`,
+      })
+      .where(eq(tasks.id, id))
+      .returning();
+
+    if (row === undefined) throw new Error('task vanished while locked');
+    return row;
+  }
+
+  /**
+   * Deletes the caller's task. `false` when there is no such task or it is
+   * someone else's. Its ledger entries stay, keeping their titles.
+   */
+  async delete(ex: Executor, userId: string, id: string): Promise<boolean> {
+    const deleted = await ex
+      .delete(tasks)
+      .where(and(eq(tasks.userId, userId), eq(tasks.id, id)))
+      .returning({ id: tasks.id });
+    return deleted.length > 0;
   }
 
   /** Removes what `day` recorded for the task, if anything. */

@@ -248,8 +248,8 @@ Screen: task slip.
 | POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built for one-offs.** See below. |
 | PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` (200). **Built for one-offs.** See below. |
 | PATCH | `/tasks/{id}/done` | `{ done }` | `Task` (200). **Built.** See below. |
-| POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` |
-| DELETE | `/tasks/{id}` | `?scope=onlyThis\|series` | 204 |
+| POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` (200). **Built for one-offs.** See below. |
+| DELETE | `/tasks/{id}` | `?scope=onlyThis\|series` | 204. **Built for one-offs.** See below. |
 
 **Repeat rules:**
 
@@ -357,6 +357,40 @@ that has already closed is carried forward right away.
   someone else's, is `404 NOT_FOUND`. There is no user read, so a deleted
   account's token gets 404 too, not the 401 that create and `/done` give. It
   does not read the session (decision 16).
+
+**Move (built, one-offs only):**
+
+- Strict body with both fields required. `blockSeriesId: null` is the date's
+  general list. There is no `version`: a place is an absolute value, so the
+  last write wins, as with `/done` (decision 26). A real move bumps `version`,
+  so the slip's follow-up `PATCH` uses the version the move returned. Moving a
+  task to where it already is returns it unchanged.
+- The block follows create's rules: an unknown series, or someone else's, is
+  `404 NOT_FOUND`, and one that doesn't fall on `date` is
+  `422 BLOCK_NOT_ON_DATE`. An unknown task, or someone else's, is also `404`.
+- **A done task takes its `completed` entry with it** to the day it now sits
+  on, replacing whatever that day held for it. It stays on a closed day it is
+  moved to.
+- **An open task moved onto a closed day carries forward at once**, as a
+  closed-day create does: to today's general list, `carryCount` up by the days
+  passed, and an `incomplete` entry for each closed day from `date` to
+  yesterday. A day that already has an entry for the task, because it carried
+  through it before, keeps that entry. `carryCount` still counts the carry
+  again.
+- The row is locked for the write. A deleted account's token gets
+  `401 TOKEN_INVALID`, because the move reads the user's time zone. It does not
+  read the session (decision 16).
+
+**Delete (built, one-offs only):**
+
+- `scope` must be `onlyThis` or `series`, and it defaults to `onlyThis`. A
+  one-off has no series, so either scope deletes just the task, as the app
+  does.
+- The ledger keeps the task's entries, with `task_id` set to null and the title
+  kept, so the dashboard doesn't change. A retry after a lost response is
+  `404 NOT_FOUND`, and so is someone else's task. There is no user read, so a
+  deleted account's token gets 404, as with `PATCH /tasks/{id}`. It does not
+  read the session (decision 16).
 
 ## 6. Notifications (NTF)
 
@@ -474,6 +508,7 @@ request turns out to be slow.
 | 23 | `POST /tasks` shipped with one-offs only. A repeat the rules allow answers `501 NOT_IMPLEMENTED`, not `REPEAT_NOT_ALLOWED`, so that code keeps one meaning: the repeat doesn't fit where the task sits. |
 | 24 | `PATCH /tasks/{id}/done` carries no `version` and is last-write-wins, since `done` is an absolute value. The `completed` ledger entry is written on the tick itself, not when the day closes, matching the app. Reopening on a closed day carries the task at once (decision 2). |
 | 25 | Renaming a task renames its ledger entries too, past days included, so the history shows the task's current title. This departs from the app, which keeps the title each entry was written with. `PATCH /tasks/{id}` reads no user row, so a deleted account's token gets 404 there. |
+| 26 | `POST /tasks/{id}/move` carries no `version` and is last-write-wins, like `/done`. A done task's `completed` entry moves with it. An open task moved onto a closed day carries forward at once (decision 2). A closed day that already recorded the task keeps its entry (`ON CONFLICT DO NOTHING`), and `carryCount` counts the carry again. `DELETE /tasks/{id}` ignores `scope` for a one-off, as the app does, and gets 404 on a retry. |
 
 ## 11. Error codes to add
 
