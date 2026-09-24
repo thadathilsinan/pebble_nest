@@ -1,3 +1,4 @@
+import { localDateTime } from '../calendar/local-date';
 import type { TaskRow } from '../core/database/schema';
 
 /** `Task` in `docs/api-plan.md` §1. */
@@ -31,7 +32,7 @@ export function toTask(row: TaskRow): Task {
     reminderAt:
       row.reminderDate === null || row.reminderMin === null
         ? null
-        : `${row.reminderDate}T${clock(row.reminderMin)}`,
+        : localDateTime(row.reminderDate, row.reminderMin),
     done: row.done,
     doneAt: row.doneAt?.toISOString() ?? null,
     carryCount: row.carryCount,
@@ -58,11 +59,4 @@ export function compareTasks(a: Task, b: Task): number {
 
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/** Minutes from midnight as `HH:mm`. */
-function clock(minutes: number): string {
-  const hh = String(Math.floor(minutes / 60)).padStart(2, '0');
-  const mm = String(minutes % 60).padStart(2, '0');
-  return `${hh}:${mm}`;
 }

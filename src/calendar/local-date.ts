@@ -13,6 +13,30 @@ export const localDate = z.iso
     'The year must be between 1900 and 2999.',
   );
 
+/**
+ * `?from=&to=`: a range of local dates, both ends included, of at most
+ * `maxDays` days. `to` before `from`, or a longer span, is a 400.
+ */
+export function localDateRange(maxDays: number) {
+  return z
+    .object({ from: localDate, to: localDate })
+    .superRefine(({ from, to }, ctx) => {
+      if (to < from) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['to'],
+          message: 'The range cannot end before it starts.',
+        });
+      } else if (daysBetween(from, to) >= maxDays) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['to'],
+          message: `A range covers at most ${maxDays} days.`,
+        });
+      }
+    });
+}
+
 /** 1 = Monday … 7 = Sunday, as `Recurrence.weekdays` counts. */
 export function isoWeekday(date: string): number {
   const weekday = asUtc(date).getUTCDay();
@@ -55,6 +79,16 @@ export function todayIn(timeZone: string, now: Date = new Date()): string {
     month: '2-digit',
     day: '2-digit',
   }).format(now);
+}
+
+/**
+ * A local wall-clock reading with no offset, `YYYY-MM-DDTHH:mm` (decision 6),
+ * from a date and minutes after its midnight.
+ */
+export function localDateTime(date: string, minutes: number): string {
+  const hh = String(Math.floor(minutes / 60)).padStart(2, '0');
+  const mm = String(minutes % 60).padStart(2, '0');
+  return `${date}T${hh}:${mm}`;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, not, or, sql } from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
 import {
   taskLedgerEntries,
@@ -342,6 +342,32 @@ export class TasksRepository {
           eq(tasks.userId, userId),
           gte(tasks.date, from),
           lte(tasks.date, to),
+        ),
+      );
+  }
+
+  /**
+   * The caller's open tasks whose reminder falls from `from` to `to`, both
+   * included, in no particular order. Keyed on the reminder's date, not the
+   * task's. Uses `idx_tasks_user_id_reminder_date`, whose predicate `NOT done`
+   * repeats here so the planner can match it.
+   */
+  findOpenRemindersBetween(
+    ex: Executor,
+    userId: string,
+    from: string,
+    to: string,
+  ): Promise<TaskRow[]> {
+    return ex
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.userId, userId),
+          not(tasks.done),
+          eq(tasks.missed, false),
+          gte(tasks.reminderDate, from),
+          lte(tasks.reminderDate, to),
         ),
       );
   }

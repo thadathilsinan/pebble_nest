@@ -1,4 +1,10 @@
-import { addDays, daysBetween, daysInMonth, todayIn } from './local-date';
+import {
+  addDays,
+  daysBetween,
+  daysInMonth,
+  localDateTime,
+  todayIn,
+} from './local-date';
 
 describe('local dates', () => {
   it('adds days across month and year ends', () => {
@@ -27,5 +33,11 @@ describe('local dates', () => {
     expect(todayIn('UTC', now)).toBe('2026-09-24');
     expect(todayIn('Asia/Kolkata', now)).toBe('2026-09-25');
     expect(todayIn('America/Los_Angeles', now)).toBe('2026-09-24');
+  });
+
+  it('formats a date and minutes as a local date-time', () => {
+    expect(localDateTime('2026-09-24', 0)).toBe('2026-09-24T00:00');
+    expect(localDateTime('2026-09-24', 545)).toBe('2026-09-24T09:05');
+    expect(localDateTime('2026-09-24', 1439)).toBe('2026-09-24T23:59');
   });
 });

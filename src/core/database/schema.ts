@@ -526,6 +526,12 @@ export const tasks = pgTable(
     ),
     // GET /days reads a user's tasks by date range.
     index('idx_tasks_user_id_date').on(table.userId, table.date),
+    // GET /notifications/schedule reads open reminders by the reminder's own
+    // date, which needn't be the task's. Partial: done tasks and tasks with
+    // no reminder, most rows, are never scheduled.
+    index('idx_tasks_user_id_reminder_date')
+      .on(table.userId, table.reminderDate)
+      .where(sql`NOT ${table.done} AND ${table.reminderDate} IS NOT NULL`),
     // schema-conventions §6: for the set-null scan when a series is deleted.
     index('idx_tasks_block_series_id').on(table.blockSeriesId),
     // TSK-01: up to 200 characters.

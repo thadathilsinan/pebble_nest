@@ -71,6 +71,13 @@
       "when": 1790247911376,
       "tag": "20260924110511_block_occurrence_overrides",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790248939617,
+      "tag": "20260924112219_task_reminders_index",
+      "breakpoints": true
     }
   ]
 }

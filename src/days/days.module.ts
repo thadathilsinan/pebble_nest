@@ -19,5 +19,7 @@ import { DaysService } from './days.service';
   ],
   controllers: [DaysController],
   providers: [DaysService],
+  // `NotificationsModule` finds block alerts in the days it lays out.
+  exports: [DaysService],
 })
 export class DaysModule {}

@@ -505,7 +505,7 @@ Notifications are scheduled locally on the phone, so there is no push API.
 
 | Method | Path | Query | Response |
 |---|---|---|---|
-| GET | `/notifications/schedule` | `from`, `to` (at most 7 days) | `{ blockAlerts: [...], taskReminders: [...] }` |
+| GET | `/notifications/schedule` | `from`, `to` (at most 7 days) | `{ blockAlerts: [...], taskReminders: [...] }`. **Built.** See below. |
 
 ```jsonc
 blockAlerts:   [{ "seriesId", "date", "name", "startAt": "YYYY-MM-DDTHH:mm", "openTaskCount" }] // skipped blocks excluded
@@ -515,6 +515,26 @@ taskReminders: [{ "taskId", "title", "remindAt": "YYYY-MM-DDTHH:mm" }]          
 The phone calls this on every app open and reschedules a rolling 7-day window
 (NTF-04). Notification permission (asked / allowed) is state on the device and
 is never sent to the server.
+
+**Built** (decision 31):
+
+- `from` and `to` are both included, at most 7 days, validated as `GET /days`
+  validates its range: `to < from` or a longer span is `400 VALIDATION_FAILED`.
+- **Block alerts** are the occurrences that **start** in the range, laid out
+  as `GET /days` lays them out, so repeats, skips, deletions and an
+  occurrence's own `alert` and times all apply. A midnight tail has no alert
+  of its own. `openTaskCount` is the occurrence's `openCount`. Ordered by
+  `startAt`, then name, then `seriesId`.
+- **Task reminders** are the open tasks whose **reminder's own date** falls in
+  the range, whatever date the task sits on, read through the partial index
+  `idx_tasks_user_id_reminder_date`. Done and missed tasks are left out.
+  Ordered by `remindAt`, then title, then `taskId`.
+- Times already past today are included; the phone drops them when it
+  schedules. A task carried forward keeps its old `reminderAt`, so a reminder
+  on a past date is not scheduled again.
+- Repeating task reminders (NTF-03) arrive with the task series slice.
+- It reads neither the session (decision 16) nor the user row, so a deleted
+  account's token gets empty lists, as with `GET /days`.
 
 ## 7. Recurrence and carry-over (REC, TSK-06/07/08)
 
@@ -620,6 +640,7 @@ request turns out to be slow.
 | 28 | A per-occurrence change lives in `block_occurrence_exceptions`, one row per series and start date, keyed `(block_series_id, date)`, which holds `skipped`, `deleted` and an occurrence's overrides. Un-skipping clears `skipped` and keeps the row. Skip and un-skip are their own module (`src/block-occurrences/`), since skipping moves tasks and `TasksModule` already imports `BlocksModule`. `POST …/skip` answers 200, since it is an action rather than a create. Skipping a closed day's occurrence carries its open tasks to today, as `/move` does (decision 26), rather than leaving them on the closed day as the app would. |
 | 29 | Deleting a block occurrence marks it `deleted` in `block_occurrence_exceptions`, for good. `scope=series` deletes every occurrence from today on **and the occurrence named, even a past one**, so the block the user tapped always goes; this departs from the app, which ends the series the day before the named occurrence. A deleted occurrence's open tasks on a closed day carry forward to today, as skip's do (decision 28). A deleted occurrence is `404 NOT_FOUND` wherever it is named, while a date the rule never lands on stays `422 BLOCK_NOT_ON_DATE`. A series with nothing left before today is deleted rather than ended. |
 | 30 | `PATCH /blocks/{seriesId}/occurrences/{date}` checks the series' one `version`, and an `onlyThis` override bumps it, so another device's edit to a different occurrence of the same series gets a 409 and refetches; there is no version per occurrence. Editing the first occurrence with `thisAndFuture` edits the series in place, as the app does. Tasks in occurrences a new rule drops move to their own day's general list (BLK-10) rather than being orphaned as in the app. Moving the first occurrence to a date its rule doesn't land on is `422 BLOCK_NOT_ON_DATE`, not a re-derived rule. `newDate` with `thisAndFuture` past the first occurrence is `400`. A block moved onto a closed day carries its open tasks to today (decision 26). |
+| 31 | `GET /notifications/schedule` builds block alerts from `DaysService.list`, so an alert follows everything the Day screen shows, and reads task reminders by the reminder's own date through a partial index on open tasks. It returns the whole window, times already past included, and leaves dropping those to the phone, so the server needs no notion of "now" here. A midnight tail has no alert. Missed tasks are left out. |
 
 ## 11. Error codes to add
 
@@ -651,7 +672,8 @@ These decisions add behaviour the UI doesn't have yet:
 - carrying a task forward when it's un-ticked on a closed day
 - replacing `PebbleRepository` with a REST client, token storage, and sending the
   time zone on app open
-- scheduling local notifications from `/notifications/schedule`
+- scheduling local notifications from `/notifications/schedule`, dropping
+  times already past
 
 ## 13. Still to set up (not blocking)
 
