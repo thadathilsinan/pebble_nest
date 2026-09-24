@@ -1,10 +1,16 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
 import { accessTokenInvalid } from '../auth/errors';
 import { SessionsRepository } from '../auth/sessions.repository';
 import { DB, type Db } from '../database/database.module';
+import type { SessionRow } from '../database/schema';
+import type { ErrorCode } from '../http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
+import {
+  isTimeZoneOnly,
+  type UpdateProfileBody,
+} from './dto/update-profile.dto';
 
 @Injectable()
 export class MeService {
@@ -24,14 +30,70 @@ export class MeService {
    * them, the user read finds nothing, and that is a 401 too.
    */
   async get(caller: Caller): Promise<Profile> {
-    const session = await this.sessions.findLiveById(this.db, caller.sessionId);
-    if (session === null || session.userId !== caller.userId) {
-      throw accessTokenInvalid();
-    }
+    const session = await this.liveSession(caller);
 
     const user = await this.users.findById(this.db, caller.userId);
     if (user === null) throw accessTokenInvalid();
 
     return toProfile(user, session.signInMethod);
+  }
+
+  /**
+   * Edits the caller's profile. It reads the session first, as `get` does, both
+   * for `signInMethod` and so that a revoked session is refused here too.
+   *
+   * A body with only `timeZone` is the device reporting its zone and skips the
+   * version check. Any other body is a versioned edit: a stale `version` is a
+   * 409 carrying the current profile, so the client can re-apply and retry
+   * without another read.
+   */
+  async update(caller: Caller, body: UpdateProfileBody): Promise<Profile> {
+    const session = await this.liveSession(caller);
+
+    if (isTimeZoneOnly(body)) {
+      const user = await this.users.setTimeZone(
+        this.db,
+        caller.userId,
+        body.timeZone,
+      );
+      if (user === null) throw accessTokenInvalid();
+
+      return toProfile(user, session.signInMethod);
+    }
+
+    const { version, ...patch } = body;
+    // The DTO requires `version` whenever the body is not time-zone-only.
+    if (version === undefined)
+      throw new Error('version missing after validation');
+
+    const result = await this.users.updateVersioned(
+      this.db,
+      caller.userId,
+      version,
+      patch,
+    );
+
+    switch (result.outcome) {
+      case 'updated':
+        return toProfile(result.row, session.signInMethod);
+      case 'stale':
+        throw new ConflictException({
+          code: 'STALE_VERSION' satisfies ErrorCode,
+          message: 'The profile was changed elsewhere. Re-apply and retry.',
+          meta: { current: toProfile(result.row, session.signInMethod) },
+        });
+      case 'missing':
+        // The account was deleted after the session read.
+        throw accessTokenInvalid();
+    }
+  }
+
+  private async liveSession(caller: Caller): Promise<SessionRow> {
+    const session = await this.sessions.findLiveById(this.db, caller.sessionId);
+    if (session === null || session.userId !== caller.userId) {
+      throw accessTokenInvalid();
+    }
+
+    return session;
   }
 }

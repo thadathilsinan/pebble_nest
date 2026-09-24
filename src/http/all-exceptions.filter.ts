@@ -12,7 +12,7 @@ import {
   describeDriverError,
   type DriverContext,
 } from '../database/driver-error';
-import type { ApiError, ApiFailure, ErrorDetail } from './envelope';
+import type { ApiError, ApiFailure, ErrorDetail, MetaScalar } from './envelope';
 import { codeForStatus, type ErrorCode } from './error-code';
 import { ensureRequestId } from './request-id';
 
@@ -239,15 +239,16 @@ function describe(exception: unknown): Outcome {
     const status = exception.getStatus();
     // Like the message, `meta` is for the caller only on a 4xx: a 5xx says
     // nothing about our internals, however it was thrown.
+    const code = namedCode(exception.getResponse()) ?? codeForStatus(status);
     const meta =
       status < SERVER_ERROR_FLOOR
-        ? namedMeta(exception.getResponse())
+        ? namedMeta(exception.getResponse(), code)
         : undefined;
 
     return {
       status,
       error: {
-        code: namedCode(exception.getResponse()) ?? codeForStatus(status),
+        code,
         // A 5xx message describes our internals even when a developer wrote it.
         message:
           status >= SERVER_ERROR_FLOOR ? OPAQUE_MESSAGE : exception.message,
@@ -351,8 +352,14 @@ function namedCode(body: unknown): ErrorCode | undefined {
  * else on the response object is dropped — which is the point: a field reaches
  * the client because someone put it under `meta` for them, never because it
  * happened to be on the object.
+ *
+ * One object gets through: `current` on `STALE_VERSION`, the resource as it now
+ * stands (`docs/adding-a-feature.md` §6.3). It is allowed for that code and key
+ * only, so an object put under `meta` anywhere else is still dropped. It is
+ * rendered as given, so the throw site must pass the mapped response type,
+ * never a row.
  */
-function namedMeta(body: unknown): ApiError['meta'] {
+function namedMeta(body: unknown, code: ErrorCode): ApiError['meta'] {
   if (typeof body !== 'object' || body === null) return undefined;
 
   const { meta } = body as { meta?: unknown };
@@ -361,8 +368,14 @@ function namedMeta(body: unknown): ApiError['meta'] {
   }
 
   const entries = Object.entries(meta as Record<string, unknown>).filter(
-    (entry): entry is [string, string | number | boolean | null] => {
-      const value = entry[1];
+    (entry): entry is [string, MetaScalar | object] => {
+      const [key, value] = entry;
+
+      if (key === 'current' && code === 'STALE_VERSION') {
+        return (
+          typeof value === 'object' && value !== null && !Array.isArray(value)
+        );
+      }
 
       return (
         value === null ||

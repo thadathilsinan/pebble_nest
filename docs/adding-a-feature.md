@@ -452,9 +452,11 @@ is not an opt-out for convenience.
 `new BadRequestException({ code, message, meta: { attemptsLeft: 2 } })`.
 `AllExceptionsFilter` copies `meta` onto a 4xx and drops every other key on the
 thrown object, so a field reaches the client only if it was put there for them.
-`meta` holds scalars only. A value that is a whole resource, such as the current
-state `STALE_VERSION` owes (§6.3), needs its own rule in the filter when the
-first `PATCH` arrives.
+`meta` holds scalars only, with one exception: `STALE_VERSION` (§6.3) carries the
+current resource as `meta.current`. The filter lets an object through for that
+code and that key only, and renders it as given, so pass the mapped response
+type (e.g. `toProfile(row, …)`), never a row. `MeService.update` is the first
+example.
 
 ### 5.2 List endpoints: cursor pagination, inside `data`
 

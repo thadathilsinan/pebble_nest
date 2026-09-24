@@ -33,9 +33,14 @@ export interface ApiError {
    * Only ever set from an explicit `meta` object at a 4xx throw site, never
    * copied from anything else on the exception, so nothing reaches here that
    * someone did not write down for the caller.
+   *
+   * Values are scalars, with one exception: `STALE_VERSION` carries the
+   * current resource as `current`, an object.
    */
-  meta?: Record<string, string | number | boolean | null>;
+  meta?: Record<string, MetaScalar | object>;
 }
+
+export type MetaScalar = string | number | boolean | null;
 
 export interface ApiFailure {
   error: ApiError;

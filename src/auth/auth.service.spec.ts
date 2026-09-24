@@ -142,7 +142,7 @@ describe('AuthService', () => {
 
     service = new AuthService(
       codes as unknown as SignInCodesRepository,
-      users,
+      users as unknown as UsersRepository,
       sessions,
       accessTokens as unknown as AccessTokensService,
       mailer,

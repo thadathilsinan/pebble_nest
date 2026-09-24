@@ -37,7 +37,7 @@ type SessionBody = {
   };
 };
 
-describe('Auth guard and GET /me (e2e)', () => {
+describe('Auth guard and /me (e2e)', () => {
   let app: NestExpressApplication;
   let pool: Pool;
   let mailer: FakeMailer;
@@ -182,6 +182,192 @@ describe('Auth guard and GET /me (e2e)', () => {
     expectTokenInvalid(
       await getMe(`Bearer ${session.accessToken}`).expect(401),
     );
+  });
+
+  describe('PATCH /me', () => {
+    function patchMe(session: SessionBody['data'], body: object) {
+      return http()
+        .patch('/api/v1/me')
+        .set('Authorization', `Bearer ${session.accessToken}`)
+        .send(body);
+    }
+
+    function expectValidationFailed(res: request.Response, path: string) {
+      expect(res.body).toMatchObject({
+        error: {
+          code: 'VALIDATION_FAILED',
+          details: [expect.objectContaining({ path })],
+        },
+      });
+    }
+
+    it('edits the profile and returns it with the next version', async () => {
+      const session = await signIn();
+
+      const res = await patchMe(session, {
+        version: 0,
+        name: '  Sinan  ',
+        weekStart: 'sunday',
+        timeFormat: 'h24',
+      }).expect(200);
+
+      expect(res.body).toEqual({
+        data: {
+          id: session.profile.id,
+          version: 1,
+          email: 'me@example.com',
+          name: 'Sinan',
+          signInMethod: 'email',
+          weekStart: 'sunday',
+          timeFormat: 'h24',
+          timeZone: null,
+          firstRecordedDay: null,
+          hasAnyRecord: false,
+        },
+      });
+      await getMe(`Bearer ${session.accessToken}`)
+        .expect(200)
+        .expect((r) =>
+          expect(r.body).toMatchObject({ data: { name: 'Sinan', version: 1 } }),
+        );
+    });
+
+    it('refuses a stale version with the current profile in meta', async () => {
+      const session = await signIn();
+      await patchMe(session, { version: 0, name: 'First' }).expect(200);
+
+      const res = await patchMe(session, {
+        version: 0,
+        name: 'Second',
+      }).expect(409);
+
+      expect(res.body).toEqual({
+        error: {
+          code: 'STALE_VERSION',
+          message: anyString,
+          meta: {
+            current: expect.objectContaining({
+              id: session.profile.id,
+              version: 1,
+              name: 'First',
+              signInMethod: 'email',
+            }) as unknown,
+          },
+        },
+      });
+    });
+
+    it('leaves the version alone when nothing changes', async () => {
+      const session = await signIn();
+
+      const res = await patchMe(session, {
+        version: 0,
+        weekStart: 'monday',
+      }).expect(200);
+
+      expect(res.body).toMatchObject({ data: { version: 0 } });
+    });
+
+    it('clears the name for a blank string or null', async () => {
+      const session = await signIn();
+      await patchMe(session, { version: 0, name: 'Sinan' }).expect(200);
+
+      await patchMe(session, { version: 1, name: '   ' })
+        .expect(200)
+        .expect((r) =>
+          expect(r.body).toMatchObject({ data: { name: null, version: 2 } }),
+        );
+      await patchMe(session, { version: 2, name: 'Again' }).expect(200);
+      await patchMe(session, { version: 3, name: null })
+        .expect(200)
+        .expect((r) =>
+          expect(r.body).toMatchObject({ data: { name: null, version: 4 } }),
+        );
+    });
+
+    it('records a time zone sent alone without a version', async () => {
+      const session = await signIn();
+      await patchMe(session, { version: 0, name: 'Moved on' }).expect(200);
+
+      // No version, and a version that is stale, both succeed.
+      await patchMe(session, { timeZone: 'Asia/Kolkata' })
+        .expect(200)
+        .expect((r) =>
+          expect(r.body).toMatchObject({
+            data: { timeZone: 'Asia/Kolkata', version: 2 },
+          }),
+        );
+      await patchMe(session, { version: 0, timeZone: 'Asia/Kolkata' })
+        .expect(200)
+        .expect((r) => expect(r.body).toMatchObject({ data: { version: 2 } }));
+    });
+
+    it('requires a version for anything but a lone time zone', async () => {
+      const session = await signIn();
+
+      expectValidationFailed(
+        await patchMe(session, { name: 'Sinan' }).expect(400),
+        'version',
+      );
+      expectValidationFailed(
+        await patchMe(session, {
+          timeZone: 'Asia/Kolkata',
+          weekStart: 'sunday',
+        }).expect(400),
+        'version',
+      );
+      expectValidationFailed(await patchMe(session, {}).expect(400), 'version');
+    });
+
+    it('refuses a name over 80 characters', async () => {
+      const session = await signIn();
+
+      expectValidationFailed(
+        await patchMe(session, { version: 0, name: 'x'.repeat(81) }).expect(
+          400,
+        ),
+        'name',
+      );
+      await patchMe(session, { version: 0, name: 'x'.repeat(80) }).expect(200);
+    });
+
+    it('refuses an unknown zone and a raw offset', async () => {
+      const session = await signIn();
+
+      for (const timeZone of ['Mars/Olympus_Mons', '+05:30', '']) {
+        expectValidationFailed(
+          await patchMe(session, { timeZone }).expect(400),
+          'timeZone',
+        );
+      }
+    });
+
+    it('refuses an unknown field and a bad enum value', async () => {
+      const session = await signIn();
+
+      expectValidationFailed(
+        await patchMe(session, { version: 0, email: 'x@example.com' }).expect(
+          400,
+        ),
+        '',
+      );
+      expectValidationFailed(
+        await patchMe(session, { version: 0, weekStart: 'friday' }).expect(400),
+        'weekStart',
+      );
+    });
+
+    it('refuses a still-valid access token once its session is signed out', async () => {
+      const session = await signIn();
+      await http()
+        .post('/api/v1/auth/sign-out')
+        .send({ refreshToken: session.refreshToken })
+        .expect(204);
+
+      expectTokenInvalid(
+        await patchMe(session, { timeZone: 'Asia/Kolkata' }).expect(401),
+      );
+    });
   });
 
   it('leaves the auth and health routes open', async () => {

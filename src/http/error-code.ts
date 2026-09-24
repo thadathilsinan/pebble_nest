@@ -38,7 +38,11 @@ export type ErrorCode =
   | 'CODE_ATTEMPTS_EXHAUSTED'
   // A refresh token that is unknown, expired, revoked or reused. One code for
   // all of them: the client does the same thing for each — sign in again.
-  | 'TOKEN_INVALID';
+  | 'TOKEN_INVALID'
+  // A PATCH carried a `version` someone else has already moved past. The
+  // current resource travels in `error.meta.current`, so the client can
+  // re-apply its edit and retry in one round trip.
+  | 'STALE_VERSION';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted

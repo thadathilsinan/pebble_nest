@@ -100,7 +100,7 @@ Screens: sign-in, code entry, first run, You.
 | POST | `/auth/refresh` | `{ refreshToken }` | `Session` (200) | **Built.** Rotates the token and slides the session's expiry to 60 days from now. Presenting a token the session has already rotated away from revokes the whole device session, except for a **30-second grace window**: the token retired most recently rotates again, so a retry after a lost response doesn't sign the device out. Unknown, expired, revoked or reused tokens all get `401 TOKEN_INVALID`. `isNewAccount` is always `false`. |
 | POST | `/auth/sign-out` | `{ refreshToken }` | 204 | **Built.** ACC-05. Ends the session the token is current for. Idempotent: an unknown, expired or already-rotated token is also 204. |
 | GET | `/me` | — | `Profile` | **Built.** Reads the caller's session, because `signInMethod` belongs to the device. So a signed-out, revoked or expired session gets `401 TOKEN_INVALID` here right away, even though the guard still accepts its access token. |
-| PATCH | `/me` | `{ version, name?, weekStart?, timeFormat?, timeZone? }` | `Profile` | The client sends `timeZone` silently on every app open. |
+| PATCH | `/me` | `{ version?, name?, weekStart?, timeFormat?, timeZone? }` | `Profile` | **Built.** `version` is required unless `timeZone` is the only field sent. The client sends its zone silently on every app open, and that write is last-write-wins and never a 409 (decision 17). A stale `version` otherwise gets `409 STALE_VERSION` with the current profile in `meta.current`. A patch that changes nothing returns 200 and leaves `version` alone. `name` is trimmed and at most 80 characters; blank or `null` clears it. `timeZone` must be an IANA name the server's `Intl` knows, not a raw offset like `+05:30`, and is stored as sent. Reads the session, like `GET /me`. |
 | DELETE | `/me` | — | 204 | ACC-06. Immediate hard delete of all data, plus Sign in with Apple token revocation. The client shows the confirmation. |
 
 ```jsonc
@@ -358,6 +358,7 @@ request turns out to be slow.
 | 14 | A general-list task that repeats on its own uses the REC-06 rule: carried over if its next occurrence is more than a day away, otherwise recorded as missed. |
 | 15 | Refresh-token reuse is detected against every token a session has retired (`session_refresh_tokens`), not only the last one. The token retired most recently stays usable for 30 seconds, for retries. Session expiry slides on each refresh. |
 | 16 | The auth guard is stateless: it checks the access token's signature and expiry, not the session. A revoked session's access token works for up to 15 minutes, except on endpoints that read the session (`GET /me`). Every bad access token is `401 TOKEN_INVALID`. There is no separate expired code. |
+| 17 | `PATCH /me` with only `timeZone` needs no `version` and is last-write-wins, because it's a fact the device reports, not an edit. A `409 STALE_VERSION` carries the current resource in `error.meta.current`, the one object-valued `meta` key. A write that changes nothing doesn't bump `version`. |
 
 ## 11. Error codes to add
 
@@ -365,7 +366,7 @@ Append these to `src/http/error-code.ts`:
 
 | Code | Status | When |
 |---|---|---|
-| `STALE_VERSION` | 409 | A `PATCH` carried an old `version`. The response body includes the current state. |
+| `STALE_VERSION` | 409 | A `PATCH` carried an old `version`. The current resource is in `error.meta.current`. **Added** (`PATCH /me`). |
 | `CODE_INVALID` | 400 | Wrong sign-in code. `error.meta.attemptsLeft`. **Added.** |
 | `CODE_EXPIRED` | 410 | The sign-in code is more than 10 minutes old, already used, or was never sent. **Added.** |
 | `CODE_ATTEMPTS_EXHAUSTED` | 429 | 5 wrong attempts. The user must request a new code. **Added.** |
