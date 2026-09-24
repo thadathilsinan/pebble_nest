@@ -1,9 +1,9 @@
 import {
+  BadRequestException,
   ConflictException,
   Inject,
   Injectable,
   NotFoundException,
-  NotImplementedException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
@@ -12,18 +12,25 @@ import { BlocksRepository } from '../blocks/blocks.repository';
 import { addDays, daysBetween } from '../calendar/local-date';
 import { resolveRecurrence, type Recurrence } from '../calendar/recurrence';
 import { DB, type Db, type Executor } from '../core/database/database.module';
-import type { TaskRow } from '../core/database/schema';
+import type { TaskRow, TaskSeriesRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
 import { todayFor } from '../users/today';
 import { UsersRepository } from '../users/users.repository';
 import type { CreateTaskBody } from './dto/create-task.dto';
+import type { DeleteTaskQuery } from './dto/delete-task.dto';
 import type { MoveTaskBody } from './dto/move-task.dto';
 import type { SetTaskDoneBody } from './dto/set-task-done.dto';
 import type { UpdateTaskBody } from './dto/update-task.dto';
-import { settle, type SeriesDays, type Settled } from './task-series';
+import {
+  ownRecurrenceOf,
+  settle,
+  type SeriesDays,
+  type Settled,
+} from './task-series';
 import {
   TaskSeriesRepository,
   type NewTaskSeries,
+  type TaskSeriesChanges,
 } from './task-series.repository';
 import { TaskSeriesService } from './task-series.service';
 import { toTask, type Task, type TaskWithSeries } from './tasks.mapper';
@@ -214,14 +221,23 @@ export class TasksService {
   }
 
   /**
-   * Edits a task's title, notes or reminder. It never moves the task or
-   * carries it: where a task sits is `/move`'s, and done is `/done`'s.
+   * Edits a task's title, notes, reminder or repeat. It never moves the task
+   * or carries it: where a task sits is `/move`'s, and done is `/done`'s.
+   *
+   * On an occurrence of a repeating task (decision 5), a new title or
+   * reminder reaches the series and its later open occurrences too; notes
+   * reach every occurrence, past ones included. Turning the repeat off stops
+   * the series here: this occurrence stays as a one-off, and open ones
+   * already issued for later dates are removed. A changed rule on a task
+   * repeating on its own stops the old series here and starts a new one from
+   * this occurrence. Turning a repeat on starts a series from this task, by
+   * `create`'s rules for where it sits.
    *
    * A stale `version` is a 409 carrying the task as it now is. A patch that
    * changes nothing returns the task without bumping `version`. A new title
-   * reaches every day the task has recorded (decision 25). The row is locked
-   * for the write, so that rename and the version check cannot interleave
-   * with another device's.
+   * reaches every day the task has recorded (decision 25). The task row is
+   * locked for the write, then its series' row, so that rename and the
+   * version check cannot interleave with another device's.
    *
    * It reads no user row, so a token whose account is gone gets the 404 its
    * vanished tasks give. It does not read the session (decision 16).
@@ -234,27 +250,72 @@ export class TasksService {
     const row = await this.db.transaction(async (tx) => {
       const task = await this.tasks.findForUpdate(tx, caller.userId, id);
       if (task === null) throw taskNotFound();
+      const series =
+        task.taskSeriesId === null
+          ? null
+          : await this.taskSeries.findByIdForUpdate(
+              tx,
+              caller.userId,
+              task.taskSeriesId,
+            );
       if (task.version !== body.version) {
         throw new ConflictException({
           code: 'STALE_VERSION' satisfies ErrorCode,
           message: 'The task was changed elsewhere. Re-apply and retry.',
-          meta: { current: toTask(await this.withSeries(tx, task)) },
+          meta: { current: toTask({ task, series }) },
         });
       }
 
-      await this.refuseRepeat(tx, task, body);
-
+      const repeat = await this.repeatChange(tx, task, series, body);
       const changes = changesTo(task, body);
-      if (changes === undefined) return task;
+      if (changes === undefined && repeat.kind === 'keep') {
+        return { task, series };
+      }
 
-      const updated = await this.tasks.update(tx, task.id, changes);
-      if (changes.title !== undefined) {
+      let updated = await this.tasks.update(tx, task.id, {
+        ...changes,
+        ...(repeat.kind === 'stop' && { taskSeriesId: null }),
+      });
+      if (changes?.title !== undefined) {
         await this.tasks.renameLedger(tx, task.id, changes.title);
       }
-      return updated;
+
+      switch (repeat.kind) {
+        case 'keep':
+          if (series !== null) {
+            await this.followEdit(tx, updated, series, changes ?? {});
+          }
+          return { task: updated, series };
+
+        case 'stop':
+          await this.stopSeriesAt(tx, series!, updated.date);
+          return { task: updated, series: null };
+
+        case 'start': {
+          const kept =
+            series === null
+              ? []
+              : await this.stopSeriesAt(tx, series, updated.date);
+          const started = await this.taskSeries.create(
+            tx,
+            seriesFrom(updated, repeat.blockSeriesId, repeat.recurrence),
+            kept,
+          );
+          updated = await this.tasks.linkSeries(tx, updated.id, started.id);
+          // Still the same task to the user, so notes reach back through the
+          // series it leaves too, as in the app.
+          if (series !== null && changes?.notes !== undefined) {
+            await this.taskSeries.update(tx, series.id, {
+              notes: changes.notes,
+            });
+            await this.tasks.shareNotes(tx, series.id, changes.notes);
+          }
+          return { task: updated, series: started };
+        }
+      }
     });
 
-    return toTask(await this.withSeries(this.db, row));
+    return toTask(row);
   }
 
   /**
@@ -262,8 +323,10 @@ export class TasksService {
    * (TSK-03). Its tasks-in-a-block rule is create's: the block must be the
    * caller's and fall on `date`.
    *
-   * A done task takes its `completed` entry with it, so the day it now sits
-   * on is the day it counts for. An open task moved onto a day that has
+   * An occurrence of a repeating task splits off as a one-off, and its series
+   * carries on where it was without it (TSK-03). A done task takes its
+   * `completed` entry with it, so the day it now sits on is the day it
+   * counts for. An open task moved onto a day that has
    * already closed is carried forward at once, as `create` carries one put
    * there (decision 2). Days it had already carried through keep the entry
    * they have.
@@ -301,19 +364,25 @@ export class TasksService {
         const moved = await this.tasks.move(tx, task.id, {
           ...body,
           carryDays: 0,
+          splitOff: true,
         });
         await this.tasks.recordCompleted(tx, moved);
         return moved;
       }
 
       if (body.date >= today) {
-        return this.tasks.move(tx, task.id, { ...body, carryDays: 0 });
+        return this.tasks.move(tx, task.id, {
+          ...body,
+          carryDays: 0,
+          splitOff: true,
+        });
       }
 
       const carried = await this.tasks.move(tx, task.id, {
         date: today,
         blockSeriesId: null,
         carryDays: daysBetween(body.date, today),
+        splitOff: true,
       });
       await this.tasks.recordIncomplete(
         tx,
@@ -332,47 +401,183 @@ export class TasksService {
    * ledger under its title, so the dashboard is unchanged. A retry after a
    * lost response is a 404.
    *
-   * It reads no user row, as `update` doesn't, so a token whose account is
-   * gone gets 404. It does not read the session (decision 16).
+   * `series` on an occurrence of a repeating task (decision 3) also deletes
+   * every occurrence from today on, done or open, and ends the series
+   * yesterday, so it issues nothing more. Occurrences before today stay in
+   * the history. A series that hadn't begun before today is deleted
+   * altogether. Either scope deletes just the task for a one-off, as the app
+   * does.
+   *
+   * It reads no user row for `onlyThis`, as `update` doesn't, so a token
+   * whose account is gone gets 404; `series` reads the user's time zone. It
+   * does not read the session (decision 16).
    */
-  async delete(caller: Caller, id: string): Promise<void> {
-    if (!(await this.tasks.delete(this.db, caller.userId, id))) {
-      throw taskNotFound();
+  async delete(
+    caller: Caller,
+    id: string,
+    scope: DeleteTaskQuery['scope'],
+  ): Promise<void> {
+    if (scope === 'onlyThis') {
+      if (!(await this.tasks.delete(this.db, caller.userId, id))) {
+        throw taskNotFound();
+      }
+      return;
+    }
+
+    const today = await this.todayFor(caller);
+    await this.db.transaction(async (tx) => {
+      const task = await this.tasks.findForUpdate(tx, caller.userId, id);
+      if (task === null) throw taskNotFound();
+      const series =
+        task.taskSeriesId === null
+          ? null
+          : await this.taskSeries.findByIdForUpdate(
+              tx,
+              caller.userId,
+              task.taskSeriesId,
+            );
+      if (series === null) {
+        await this.tasks.delete(tx, caller.userId, task.id);
+        return;
+      }
+
+      await this.tasks.deleteSeriesFrom(tx, series.id, today, task.id);
+      if (series.anchorDate >= today) {
+        await this.taskSeries.delete(tx, series.id);
+      } else {
+        await this.taskSeries.endBy(tx, series.id, addDays(today, -1));
+      }
+    });
+  }
+
+  /**
+   * What a patch does to the task's repeat, by `create`'s rules for where
+   * it sits (decision 1). A repeat that doesn't fit is `REPEAT_NOT_ALLOWED`.
+   * Fields that restate the repeat the task already has change nothing.
+   */
+  private async repeatChange(
+    ex: Executor,
+    task: TaskRow,
+    series: TaskSeriesRow | null,
+    body: UpdateTaskBody,
+  ): Promise<RepeatChange> {
+    const ownRepeat =
+      body.recurrence !== undefined && body.recurrence.kind !== 'none';
+    const withBlock = body.repeatWithBlock === true;
+
+    if (series === null) {
+      if (!ownRepeat && !withBlock) return { kind: 'keep' };
+      if (task.blockSeriesId === null) {
+        if (withBlock) throw repeatNotAllowed();
+        return {
+          kind: 'start',
+          blockSeriesId: null,
+          recurrence: this.ownRule(body, task.date),
+        };
+      }
+      if (ownRepeat) throw repeatNotAllowed();
+      // Set null when its series goes, so a block id here is still the user's.
+      const block = await this.blocks.findById(
+        ex,
+        task.userId,
+        task.blockSeriesId,
+      );
+      if (block === null || block.recurrenceKind === 'none') {
+        throw repeatNotAllowed();
+      }
+      return {
+        kind: 'start',
+        blockSeriesId: block.id,
+        recurrence: null,
+      };
+    }
+
+    if (series.blockSeriesId !== null) {
+      if (ownRepeat) throw repeatNotAllowed();
+      return body.repeatWithBlock === false
+        ? { kind: 'stop' }
+        : { kind: 'keep' };
+    }
+
+    if (withBlock) throw repeatNotAllowed();
+    if (body.recurrence === undefined) return { kind: 'keep' };
+    if (!ownRepeat) return { kind: 'stop' };
+    const recurrence = this.ownRule(body, task.date);
+    return sameRecurrence(recurrence, ownRecurrenceOf(series)!)
+      ? { kind: 'keep' }
+      : { kind: 'start', blockSeriesId: null, recurrence };
+  }
+
+  /**
+   * The patch's own recurrence, anchored on `date`. Its first occurrence is
+   * `date`, so the repeat cannot end before it.
+   */
+  private ownRule(body: UpdateTaskBody, date: string): Recurrence {
+    const recurrence = resolveRecurrence(body.recurrence, date);
+    if (recurrence.until !== null && recurrence.until < date) {
+      throw new BadRequestException({
+        code: 'VALIDATION_FAILED' satisfies ErrorCode,
+        message: 'The repeat cannot end before the task’s date.',
+      });
+    }
+    return recurrence;
+  }
+
+  /**
+   * An edit to one occurrence carried through its series (decision 5): the
+   * title and reminder to the series and its later open occurrences, the
+   * notes to the series and every occurrence.
+   */
+  private async followEdit(
+    ex: Executor,
+    task: TaskRow,
+    series: TaskSeriesRow,
+    changes: TaskChanges,
+  ): Promise<void> {
+    const reminderChanged = changes.reminderDate !== undefined;
+    const reminder =
+      task.reminderDate === null || task.reminderMin === null
+        ? null
+        : {
+            dayOffset: daysBetween(task.date, task.reminderDate),
+            min: task.reminderMin,
+          };
+
+    const template: TaskSeriesChanges = {
+      ...(changes.title !== undefined && { title: changes.title }),
+      ...(changes.notes !== undefined && { notes: changes.notes }),
+      ...(reminderChanged && {
+        reminderDayOffset: reminder?.dayOffset ?? null,
+        reminderMin: reminder?.min ?? null,
+      }),
+    };
+    if (Object.keys(template).length === 0) return;
+    await this.taskSeries.update(ex, series.id, template);
+
+    if (changes.title !== undefined || reminderChanged) {
+      await this.tasks.applyToLaterOpen(ex, series.id, task.date, {
+        ...(changes.title !== undefined && { title: changes.title }),
+        ...(reminderChanged && { reminder }),
+      });
+    }
+    if (changes.notes !== undefined) {
+      await this.tasks.shareNotes(ex, series.id, changes.notes);
     }
   }
 
   /**
-   * Turning a one-off into a repeat, by the rules `create` applies to where
-   * the task sits: a repeat that doesn't fit is `REPEAT_NOT_ALLOWED`, and one
-   * that does waits for the task series slice. Turning a repeat off is a
-   * no-op, since every task is a one-off until then.
+   * Stops the series after `date`: it issues nothing later, its open
+   * occurrences already issued for later dates are removed, and done ones
+   * stay as one-offs. Returns those done ones' dates, so a series started
+   * in its place doesn't issue them again.
    */
-  private async refuseRepeat(
+  private async stopSeriesAt(
     ex: Executor,
-    task: TaskRow,
-    body: UpdateTaskBody,
-  ): Promise<void> {
-    const ownRepeat =
-      body.recurrence !== undefined && body.recurrence.kind !== 'none';
-    const withBlock = body.repeatWithBlock === true;
-    if (!ownRepeat && !withBlock) return;
-
-    if (task.blockSeriesId === null) {
-      if (withBlock) throw repeatNotAllowed();
-      throw repeatsNotYet();
-    }
-    if (ownRepeat) throw repeatNotAllowed();
-
-    // Set null when its series goes, so a block id here is still the user's.
-    const series = await this.blocks.findById(
-      ex,
-      task.userId,
-      task.blockSeriesId,
-    );
-    if (series === null || series.recurrenceKind === 'none') {
-      throw repeatNotAllowed();
-    }
-    throw repeatsNotYet();
+    series: TaskSeriesRow,
+    date: string,
+  ): Promise<string[]> {
+    await this.taskSeries.endBy(ex, series.id, date);
+    return this.tasks.dropLaterCopies(ex, series.id, date);
   }
 
   /**
@@ -481,17 +686,51 @@ function recurrenceColumns(
   };
 }
 
+/** What `PATCH /tasks/{id}` does to the task's repeat. */
+type RepeatChange =
+  | { kind: 'keep' }
+  | { kind: 'stop' }
+  | {
+      kind: 'start';
+      /** Set to repeat with that block; null to repeat on its own. */
+      blockSeriesId: string | null;
+      recurrence: Recurrence | null;
+    };
+
+/** A new series started from `task`, as it now is, on its date. */
+function seriesFrom(
+  task: TaskRow,
+  blockSeriesId: string | null,
+  recurrence: Recurrence | null,
+): NewTaskSeries {
+  return {
+    userId: task.userId,
+    blockSeriesId,
+    anchorDate: task.date,
+    ...recurrenceColumns(recurrence),
+    title: task.title,
+    notes: task.notes,
+    reminderDayOffset:
+      task.reminderDate === null
+        ? null
+        : daysBetween(task.date, task.reminderDate),
+    reminderMin: task.reminderMin,
+  };
+}
+
+function sameRecurrence(a: Recurrence, b: Recurrence): boolean {
+  return (
+    a.kind === b.kind &&
+    a.until === b.until &&
+    a.weekdays.join() === b.weekdays.join() &&
+    a.monthDays.join() === b.monthDays.join()
+  );
+}
+
 function taskNotFound(): NotFoundException {
   return new NotFoundException({
     code: 'NOT_FOUND' satisfies ErrorCode,
     message: 'No such task.',
-  });
-}
-
-function repeatsNotYet(): NotImplementedException {
-  return new NotImplementedException({
-    code: 'NOT_IMPLEMENTED' satisfies ErrorCode,
-    message: 'Repeating tasks are not available yet.',
   });
 }
 

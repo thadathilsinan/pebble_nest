@@ -394,10 +394,10 @@ Screen: task slip.
 | Method | Path | Body | Response |
 |---|---|---|---|
 | POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built.** See below. |
-| PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` (200). **Built for one-offs.** See below. |
+| PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` (200). **Built.** See below. |
 | PATCH | `/tasks/{id}/done` | `{ done }` | `Task` (200). **Built.** See below. |
-| POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` (200). **Built for one-offs.** See below. |
-| DELETE | `/tasks/{id}` | `?scope=onlyThis\|series` | 204. **Built for one-offs.** See below. |
+| POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` (200). **Built.** See below. |
+| DELETE | `/tasks/{id}` | `?scope=onlyThis\|series` | 204. **Built.** See below. |
 
 **Repeat rules:**
 
@@ -495,7 +495,7 @@ that has already closed is carried forward right away.
   since its day has already been settled. A repeating task reopened on a
   closed day settles as a closed-day create does, by its series (REC-06).
 
-**Edit (built, one-offs only):**
+**Edit (built):**
 
 - Strict body. `version` is required. `title`, `notes` and `reminderAt` follow
   create's rules. An absent field is left alone, and `reminderAt: null` clears
@@ -505,20 +505,35 @@ that has already closed is carried forward right away.
 - A stale `version` is `409 STALE_VERSION` with the task in `meta.current`.
   A patch that changes nothing returns 200 and leaves `version` alone. The
   version check comes before the repeat checks.
-- The repeat fields are accepted because the task slip sends them on every
-  save, and they follow create's rules. A repeat that doesn't fit where the
-  task sits is `422 REPEAT_NOT_ALLOWED`, and one that fits is
-  `501 NOT_IMPLEMENTED`. `repeatWithBlock: false` and
-  `recurrence: {kind: "none"}` change nothing.
+- The repeat fields follow create's rules, and restating the repeat the task
+  already has changes nothing. A repeat that doesn't fit is
+  `422 REPEAT_NOT_ALLOWED`: judged by where a one-off sits, and by its
+  series' kind for an occurrence (`repeatWithBlock: true` on one repeating on
+  its own, or a repeating `recurrence` on one repeating with its block).
+  Turning a repeat on starts a series from the task on its date, as create
+  does.
+- **On an occurrence of a repeating task** (decision 36): a new title or
+  reminder goes to the series and to its open occurrences dated after this
+  one, each bumping its `version`; done ones keep theirs. A reminder keeps
+  its time of day and its distance in days from each occurrence's date.
+  Notes go to the series and every occurrence, past ones included.
+  `repeatWithBlock: false` or `recurrence: {kind: "none"}` stops the series
+  here: this occurrence becomes a one-off, open occurrences already issued
+  for later dates are deleted, and done ones stay as one-offs. A different
+  `recurrence` on one repeating on its own stops the old series the same way
+  and starts a new one from this occurrence; notes sent in the same save
+  still reach the old series' occurrences. An `until` before the task's date
+  is `400 VALIDATION_FAILED`.
 - **A new title renames every ledger entry the task has** (decision 25). This
   happens in the same transaction, with the task row locked, so two devices
   editing at the same `version` get one 200 and one 409.
+- The task row is locked, then its series row, in that order.
 - An id that isn't a UUID is `400 VALIDATION_FAILED`. An unknown task, or
   someone else's, is `404 NOT_FOUND`. There is no user read, so a deleted
   account's token gets 404 too, not the 401 that create and `/done` give. It
   does not read the session (decision 16).
 
-**Move (built, one-offs only):**
+**Move (built):**
 
 - Strict body with both fields required. `blockSeriesId: null` is the date's
   general list. There is no `version`: a place is an absolute value, so the
@@ -528,6 +543,8 @@ that has already closed is carried forward right away.
 - The block follows create's rules: an unknown series, or someone else's, is
   `404 NOT_FOUND`, and one that doesn't fall on `date` is
   `422 BLOCK_NOT_ON_DATE`. An unknown task, or someone else's, is also `404`.
+- **An occurrence of a repeating task that moves splits off as a one-off**
+  (`repeat: null`). Its series carries on and never issues that date again.
 - **A done task takes its `completed` entry with it** to the day it now sits
   on, replacing whatever that day held for it. It stays on a closed day it is
   moved to.
@@ -541,11 +558,17 @@ that has already closed is carried forward right away.
   `401 TOKEN_INVALID`, because the move reads the user's time zone. It does not
   read the session (decision 16).
 
-**Delete (built, one-offs only):**
+**Delete (built):**
 
 - `scope` must be `onlyThis` or `series`, and it defaults to `onlyThis`. A
   one-off has no series, so either scope deletes just the task, as the app
-  does.
+  does. `onlyThis` on an occurrence deletes it, and its date is never issued
+  again.
+- `series` on an occurrence deletes it wherever it is, and every occurrence
+  of its series dated today or later, done or open, then ends the series
+  yesterday. Earlier occurrences stay, with their `repeat`. A series that
+  began today or later is deleted outright. `series` reads the user's time
+  zone, so a deleted account's token gets `401 TOKEN_INVALID` there.
 - The ledger keeps the task's entries, with `task_id` set to null and the title
   kept, so the dashboard doesn't change. A retry after a lost response is
   `404 NOT_FOUND`, and so is someone else's task. There is no user read, so a
@@ -706,7 +729,7 @@ request turns out to be slow.
 | 20 | A series' anchor (the `date` it was created with) is an occurrence only if the recurrence lands on it, as in the app. `POST /blocks` returns the first real occurrence, and refuses with `422 BLOCK_NO_OCCURRENCE` a series that would have none. |
 | 21 | `GET /days` expands recurrences in memory from one query per request, and the range form ships with the single-day form. A block's midnight tail is listed on the following day with its start `date`. |
 | 22 | Until the day-end job keeps a record of the last day it closed, a day is closed once it is before today in the user's time zone (UTC before the device reports one). Closed-day carry is computed on the write: the task lands on today's general list, and the ledger gets one `incomplete` row per day it passed through, written with `generate_series`, so even a date decades back is one statement. |
-| 23 | `POST /tasks` shipped with one-offs only. A repeat the rules allow answers `501 NOT_IMPLEMENTED`, not `REPEAT_NOT_ALLOWED`, so that code keeps one meaning: the repeat doesn't fit where the task sits. |
+| 23 | `POST /tasks` shipped with one-offs only. A repeat the rules allow answers `501 NOT_IMPLEMENTED`, not `REPEAT_NOT_ALLOWED`, so that code keeps one meaning: the repeat doesn't fit where the task sits. Superseded by decision 35: the 501 is gone. |
 | 24 | `PATCH /tasks/{id}/done` carries no `version` and is last-write-wins, since `done` is an absolute value. The `completed` ledger entry is written on the tick itself, not when the day closes, matching the app. Reopening on a closed day carries the task at once (decision 2). |
 | 25 | Renaming a task renames its ledger entries too, past days included, so the history shows the task's current title. This departs from the app, which keeps the title each entry was written with. `PATCH /tasks/{id}` reads no user row, so a deleted account's token gets 404 there. |
 | 26 | `POST /tasks/{id}/move` carries no `version` and is last-write-wins, like `/done`. A done task's `completed` entry moves with it. An open task moved onto a closed day carries forward at once (decision 2). A closed day that already recorded the task keeps its entry (`ON CONFLICT DO NOTHING`), and `carryCount` counts the carry again. `DELETE /tasks/{id}` ignores `scope` for a one-off, as the app does, and gets 404 on a retry. |
@@ -719,6 +742,7 @@ request turns out to be slow.
 | 33 | `POST /auth/google` links by the verified email only: no identities table, and Google's `sub` isn't stored, so a Google account whose email changes opens a new Pebble account, as an email change would with email sign-in. Google's name fills `users.name` only while it is null. A token Google didn't issue for us, or one with an unverified email, is `401 ID_TOKEN_INVALID`, apart from `TOKEN_INVALID` because the client's next step is to try Google again, not to sign in again; Apple will use it too. `GOOGLE_CLIENT_IDS` is optional outside production, and the route is a 503 without it. Tokens are checked with `jsonwebtoken` against Google's JWKS, fetched with Node's `fetch` and cached for its `max-age`; `jose` 6 is ESM-only and Jest here runs CommonJS. A `kid` the cache lacks refetches at most once in 5 minutes, since the sender chooses the `kid`. |
 | 34 | `POST /auth/apple` links by the verified email only, as Google does (decision 33), and shares its verifier (`src/auth/id-tokens/`). The authorization code must be exchanged for a sign-in to succeed, so every Apple account has a refresh token to revoke. That token is stored as Apple sent it in `apple_grants`, not encrypted: revoking needs the token itself, and without our Apple private key it can only revoke the grant or mint Apple ID tokens for our app. `DELETE /me` revokes it after the delete commits, and the answer doesn't depend on the revoke: a failed revoke is logged, and the account stays deleted, so deletion never depends on Apple being up. iOS only: no Services ID, so no web or Android flow and no `redirect_uri`. No `nonce` check, as with Google. Apple's server-to-server notifications (a user revoking the app from their Apple ID settings) are not handled. The four `APPLE_` settings are all-or-none, the private key is checked to be a P-256 PEM at boot, and production refuses to start without them. |
 | 35 | Task series live in `task_series`, with each occurrence a row in `tasks` (`task_series_id`). Occurrences are **issued as their dates are read**: `GET /days` writes any occurrence in its range not yet issued, closed days included, before reading the tasks. `task_series_issued_dates` holds one row per series and date, and its key makes issuing idempotent and race-safe (one `INSERT … ON CONFLICT DO NOTHING` feeding the task insert), so an occurrence that is moved, split off or deleted never comes back. A closed day's issued occurrence stays open for the day-end job to settle. A repeating task created on a closed day is settled itself (carried, or missed by REC-06: on the day before its series' next occurrence), but its series' other closed-day occurrences are not issued and settled on the spot as the app does; they appear open when those days are read. A series in a block lands on the block's occurrences that aren't deleted, skipped ones included, as in the app. Reopening a missed task leaves it missed. |
+| 36 | Editing an occurrence of a repeating task follows the app: title and reminder reach the series and its later **open** occurrences, notes reach every occurrence, and turning the repeat off stops the series at this occurrence and deletes its later open copies, keeping done ones as one-offs. A changed own rule ends the old series here and starts a new one from this occurrence, with the done later copies' dates marked issued so they aren't doubled. `/move` splits an occurrence off as a one-off. `DELETE ?scope=series` deletes the named occurrence and every one from today on, and ends the series yesterday, or deletes it if it began today or later. The task row is locked before its series row. `PATCH` with the `Recurrence` exactly as it came back (`monthDays: []` on a weekly one) is still `400`, as for blocks. |
 
 ## 11. Error codes to add
 

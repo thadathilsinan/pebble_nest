@@ -945,7 +945,7 @@ describe('PATCH /tasks/{id} (e2e)', () => {
     }
   });
 
-  it('answers 501 for a repeat that fits, until repeating tasks exist', async () => {
+  it('starts a series for a repeat that fits', async () => {
     const general = await createTask({ title: 'A', date: future });
     const daily = await postBlock({ recurrence: { kind: 'daily' } });
     const inBlock = await createTask({
@@ -954,18 +954,15 @@ describe('PATCH /tasks/{id} (e2e)', () => {
       blockSeriesId: daily,
     });
 
-    for (const [id, body] of [
-      [general.id, { recurrence: { kind: 'daily' } }],
-      [inBlock.id, { repeatWithBlock: true }],
+    for (const [id, body, mode] of [
+      [general.id, { recurrence: { kind: 'daily' } }, 'own'],
+      [inBlock.id, { repeatWithBlock: true }, 'withBlock'],
     ] as const) {
-      const res = await patchTask(id, {
-        version: 0,
-        title: 'C',
-        ...body,
-      }).expect(501);
-      expect(codeOf(res.body)).toBe('NOT_IMPLEMENTED');
+      const res = await patchTask(id, { version: 0, ...body }).expect(200);
+      expect(res.body).toMatchObject({
+        data: { version: 1, repeat: { mode } },
+      });
     }
-    expect((await getDay(future)).generalList).toEqual([general]);
   });
 
   it('answers 404 for an unknown task, someone else’s, or a deleted account', async () => {

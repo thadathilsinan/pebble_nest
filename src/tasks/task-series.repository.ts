@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
 import {
   taskSeries,
@@ -7,6 +7,11 @@ import {
   tasks,
   type TaskSeriesRow,
 } from '../core/database/schema';
+
+/** What editing a series' template can change. */
+export type TaskSeriesChanges = Partial<
+  Pick<TaskSeriesRow, 'title' | 'notes' | 'reminderDayOffset' | 'reminderMin'>
+>;
 
 /** The columns a new series is written with. */
 export type NewTaskSeries = Pick<
@@ -26,15 +31,83 @@ export type NewTaskSeries = Pick<
 
 @Injectable()
 export class TaskSeriesRepository {
-  /** Inserts a series and records its anchor as issued. */
-  async create(ex: Executor, values: NewTaskSeries): Promise<TaskSeriesRow> {
+  /**
+   * Inserts a series and records its anchor as issued, along with `issued`:
+   * dates that already have an occurrence it must not issue again.
+   */
+  async create(
+    ex: Executor,
+    values: NewTaskSeries,
+    issued: string[] = [],
+  ): Promise<TaskSeriesRow> {
     const [row] = await ex.insert(taskSeries).values(values).returning();
     if (row === undefined)
       throw new Error('task series insert returned no row');
-    await ex
-      .insert(taskSeriesIssuedDates)
-      .values({ taskSeriesId: row.id, date: row.anchorDate });
+    await ex.insert(taskSeriesIssuedDates).values(
+      [...new Set([row.anchorDate, ...issued])].map((date) => ({
+        taskSeriesId: row.id,
+        date,
+      })),
+    );
     return row;
+  }
+
+  /**
+   * One of the user's series, locked until the transaction ends. Taken after
+   * the lock on the task it is reached through, so two edits through
+   * different occurrences take turns.
+   */
+  async findByIdForUpdate(
+    ex: Executor,
+    userId: string,
+    id: string,
+  ): Promise<TaskSeriesRow | null> {
+    const [row] = await ex
+      .select()
+      .from(taskSeries)
+      .where(and(eq(taskSeries.userId, userId), eq(taskSeries.id, id)))
+      .limit(1)
+      .for('update');
+    return row ?? null;
+  }
+
+  /** Writes `changes` to the series' template. The caller holds its lock. */
+  async update(
+    ex: Executor,
+    id: string,
+    changes: TaskSeriesChanges,
+  ): Promise<TaskSeriesRow> {
+    const [row] = await ex
+      .update(taskSeries)
+      .set(changes)
+      .where(eq(taskSeries.id, id))
+      .returning();
+    if (row === undefined) throw new Error('task series vanished while locked');
+    return row;
+  }
+
+  /**
+   * Ends the series on `endedOn`, unless it already ends by then: it issues
+   * nothing after that day.
+   */
+  async endBy(ex: Executor, id: string, endedOn: string): Promise<void> {
+    await ex
+      .update(taskSeries)
+      .set({ endedOn })
+      .where(
+        and(
+          eq(taskSeries.id, id),
+          or(isNull(taskSeries.endedOn), gt(taskSeries.endedOn, endedOn)),
+        ),
+      );
+  }
+
+  /**
+   * Deletes the series and the dates it issued. Its remaining tasks become
+   * one-offs.
+   */
+  async delete(ex: Executor, id: string): Promise<void> {
+    await ex.delete(taskSeries).where(eq(taskSeries.id, id));
   }
 
   /** One of the user's series, or null. */

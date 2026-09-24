@@ -44,9 +44,15 @@ export interface Carry {
   missed?: boolean;
 }
 
-/** The columns `PATCH /tasks/{id}` edits. */
+/**
+ * The columns `PATCH /tasks/{id}` edits, and the series it links the task
+ * to or unlinks it from.
+ */
 export type TaskChanges = Partial<
-  Pick<TaskRow, 'title' | 'notes' | 'reminderDate' | 'reminderMin'>
+  Pick<
+    TaskRow,
+    'title' | 'notes' | 'reminderDate' | 'reminderMin' | 'taskSeriesId'
+  >
 >;
 
 @Injectable()
@@ -342,13 +348,19 @@ export class TasksRepository {
   /**
    * Puts the task on `to.date`, in `to.blockSeriesId`'s occurrence or on the
    * general list, and bumps `version` once. `carryDays` adds carries, for a
-   * task moved onto a closed day and carried on from there. The caller holds
-   * the row's lock and has checked the place changes.
+   * task moved onto a closed day and carried on from there. `splitOff`
+   * makes an occurrence of a repeating task a one-off (TSK-03). The caller
+   * holds the row's lock and has checked the place changes.
    */
   async move(
     ex: Executor,
     id: string,
-    to: { date: string; blockSeriesId: string | null; carryDays: number },
+    to: {
+      date: string;
+      blockSeriesId: string | null;
+      carryDays: number;
+      splitOff?: boolean;
+    },
   ): Promise<TaskRow> {
     const [row] = await ex
       .update(tasks)
@@ -357,6 +369,7 @@ export class TasksRepository {
         blockSeriesId: to.blockSeriesId,
         carryCount: sql`${tasks.carryCount} + ${to.carryDays}`,
         version: sql`${tasks.version} + 1`,
+        ...(to.splitOff && { taskSeriesId: null }),
       })
       .where(eq(tasks.id, id))
       .returning();
@@ -375,6 +388,117 @@ export class TasksRepository {
       .where(and(eq(tasks.userId, userId), eq(tasks.id, id)))
       .returning({ id: tasks.id });
     return deleted.length > 0;
+  }
+
+  /**
+   * Gives the series' open occurrences dated after `after` the task's new
+   * title and reminder, bumping each one's `version` and renaming what its
+   * days recorded (decisions 5, 25). A reminder moves with each date:
+   * `reminderDayOffset` days after it. Done ones keep what they were done
+   * as.
+   */
+  async applyToLaterOpen(
+    ex: Executor,
+    taskSeriesId: string,
+    after: string,
+    changes: {
+      title?: string;
+      reminder?: { dayOffset: number; min: number } | null;
+    },
+  ): Promise<void> {
+    const reminder = changes.reminder;
+    const updated = await ex
+      .update(tasks)
+      .set({
+        ...(changes.title !== undefined && { title: changes.title }),
+        ...(reminder !== undefined && {
+          reminderDate:
+            reminder === null
+              ? null
+              : sql`${tasks.date} + ${reminder.dayOffset}::int`,
+          reminderMin: reminder?.min ?? null,
+        }),
+        version: sql`${tasks.version} + 1`,
+      })
+      .where(
+        and(
+          eq(tasks.taskSeriesId, taskSeriesId),
+          gt(tasks.date, after),
+          eq(tasks.done, false),
+        ),
+      )
+      .returning({ id: tasks.id });
+
+    if (changes.title !== undefined && updated.length > 0) {
+      await ex
+        .update(taskLedgerEntries)
+        .set({ title: changes.title })
+        .where(
+          inArray(
+            taskLedgerEntries.taskId,
+            updated.map((row) => row.id),
+          ),
+        );
+    }
+  }
+
+  /**
+   * Gives every occurrence of the series, past ones included, `notes`
+   * (decision 5), bumping `version` on each that changes.
+   */
+  async shareNotes(
+    ex: Executor,
+    taskSeriesId: string,
+    notes: string,
+  ): Promise<void> {
+    await ex
+      .update(tasks)
+      .set({ notes, version: sql`${tasks.version} + 1` })
+      .where(and(eq(tasks.taskSeriesId, taskSeriesId), ne(tasks.notes, notes)));
+  }
+
+  /**
+   * What stopping a series after `after` does to the occurrences it has
+   * already issued past that day: open ones are deleted, since they existed
+   * only because the series did, and done ones stay where they are as
+   * one-offs. Returns the done ones' dates.
+   */
+  async dropLaterCopies(
+    ex: Executor,
+    taskSeriesId: string,
+    after: string,
+  ): Promise<string[]> {
+    const later = and(
+      eq(tasks.taskSeriesId, taskSeriesId),
+      gt(tasks.date, after),
+    );
+    await ex.delete(tasks).where(and(later, eq(tasks.done, false)));
+    const kept = await ex
+      .update(tasks)
+      .set({ taskSeriesId: null, version: sql`${tasks.version} + 1` })
+      .where(later)
+      .returning({ date: tasks.date });
+    return kept.map((row) => row.date);
+  }
+
+  /**
+   * Deletes every occurrence of the series dated `from` or later, done or
+   * open, and `id` wherever it is. Their days' records stay in the ledger.
+   */
+  async deleteSeriesFrom(
+    ex: Executor,
+    taskSeriesId: string,
+    from: string,
+    id: string,
+  ): Promise<void> {
+    await ex
+      .delete(tasks)
+      .where(
+        or(
+          eq(tasks.id, id),
+          and(eq(tasks.taskSeriesId, taskSeriesId), gte(tasks.date, from)),
+        ),
+      );
   }
 
   /** Removes what `day` recorded for the task, if anything. */

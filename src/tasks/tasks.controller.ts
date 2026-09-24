@@ -60,11 +60,8 @@ export class TasksController {
   async delete(
     @CurrentCaller() caller: Caller,
     @Param() { id }: TaskIdParams,
-    // Validated, but every task is a one-off until task series exist, so the
-    // scope changes nothing yet.
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    @Query() _query: DeleteTaskQuery,
+    @Query() { scope }: DeleteTaskQuery,
   ): Promise<void> {
-    await this.tasks.delete(caller, id);
+    await this.tasks.delete(caller, id, scope);
   }
 }
