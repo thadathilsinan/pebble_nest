@@ -4,6 +4,7 @@ import { AuthModule } from './auth/auth.module';
 import { BlocksModule } from './blocks/blocks.module';
 import { AppConfigModule } from './core/config/config.module';
 import { DatabaseModule } from './core/database/database.module';
+import { DaysModule } from './days/days.module';
 import { HealthModule } from './core/health/health.module';
 import { AllExceptionsFilter } from './core/http/all-exceptions.filter';
 import { ResponseEnvelopeInterceptor } from './core/http/response.interceptor';
@@ -29,6 +30,7 @@ import { ZodValidationPipe } from './core/validation/validation.pipe';
     AuthModule,
     MeModule,
     BlocksModule,
+    DaysModule,
   ],
   providers: [
     // Registered here rather than in `main.ts` so tests built with

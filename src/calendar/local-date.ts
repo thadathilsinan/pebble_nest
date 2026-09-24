@@ -24,6 +24,26 @@ export function dayOfMonth(date: string): number {
   return asUtc(date).getUTCDate();
 }
 
+/** The number of days in `date`'s month: 28..31. */
+export function daysInMonth(date: string): number {
+  const d = asUtc(date);
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+}
+
+/** `date` moved by `days`, which may be negative. */
+export function addDays(date: string, days: number): string {
+  const d = asUtc(date);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Whole days from `from` to `to`: positive when `to` is later. */
+export function daysBetween(from: string, to: string): number {
+  return Math.round((asUtc(to).getTime() - asUtc(from).getTime()) / 86_400_000);
+}
+
 /**
  * Midnight UTC on `date`, for calendar arithmetic only. UTC because it has no
  * daylight-saving gaps, not because the date means anything in UTC.

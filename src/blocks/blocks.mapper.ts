@@ -24,13 +24,28 @@ export interface BlockOccurrence {
   totalCount: number;
 }
 
+/** The series' recurrence, in its wire shape. */
+export function recurrenceOf(row: BlockSeriesRow): Recurrence {
+  return {
+    kind: row.recurrenceKind,
+    weekdays: row.weekdays,
+    monthDays: row.monthDays,
+    until: row.until,
+  };
+}
+
 /**
  * The occurrence of `row` that starts on `date`. With no exceptions table yet,
  * every occurrence is the series itself: not skipped, not edited.
+ *
+ * `continuedFromPreviousDay` marks the copy of yesterday's midnight-crossing
+ * occurrence that a day's timeline shows as its tail (BLK-04). `date` is still
+ * the day it starts.
  */
 export function toBlockOccurrence(
   row: BlockSeriesRow,
   date: string,
+  continuedFromPreviousDay = false,
 ): BlockOccurrence {
   return {
     seriesId: row.id,
@@ -41,16 +56,11 @@ export function toBlockOccurrence(
     endMin: row.endMin,
     alert: row.alert,
     skipped: false,
-    recurrence: {
-      kind: row.recurrenceKind,
-      weekdays: row.weekdays,
-      monthDays: row.monthDays,
-      until: row.until,
-    },
+    recurrence: recurrenceOf(row),
     // Chosen traces are stored with `PUT /block-names/{name}/trace`, which
     // does not exist yet.
     trace: null,
-    continuedFromPreviousDay: false,
+    continuedFromPreviousDay,
     tasks: [],
     openCount: 0,
     totalCount: 0,

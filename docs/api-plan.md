@@ -154,6 +154,25 @@ Day = {
 
 The range form serves swipe prefetch and the Now screen (today + tomorrow).
 
+**Built, both forms.** Blocks only: `generalList` and each block's `tasks` are
+`[]` until tasks exist.
+
+- **Which days a series lands on** follows the app's `Recurrence.occursOn`
+  (`src/calendar/recurrence.ts`): never before the anchor or after `until`, and
+  the anchor itself only when the rule fits it (decision 20). A monthly day past
+  the month's end falls on its last day (REC-02).
+- **Midnight crossings (BLK-04):** day D also lists the tail of each block that
+  started on D−1 with `endMin <= startMin` and `endMin > 0`, with
+  `date = D−1` and `continuedFromPreviousDay: true`. A block ending exactly at
+  midnight has no tail. A repeating block's last occurrence still has its tail
+  on the day after `until`.
+- **Order:** tails first, then by `startMin`, then name, then `seriesId`. Lanes
+  are the client's job.
+- **Range:** `from` and `to` are both included, at most 14 days; `to < from` or a
+  longer span is `400 VALIDATION_FAILED`. One query reads the caller's series
+  and the days are expanded in memory.
+- It does not read the session (decision 16).
+
 ## 4. Blocks (BLK, REC-04)
 
 Screens: block slip, block sheet.
@@ -180,7 +199,11 @@ Screens: block slip, block sheet.
   and returns it filled in, so a returned `Recurrence` is always explicit.
   Duplicate days are dropped. A retry with the same `idempotencyKey` returns the
   block the first request created, with 201, whatever the retry's body says. The
-  key is scoped to the user. The response is the occurrence on `date`, with
+  key is scoped to the user. The response is the **first occurrence on or after
+  `date`**: `date` itself unless the rule skips it, so a weekly block of Mondays
+  created on a Wednesday answers with the next Monday (decision 20). A repeat
+  whose `until` comes before its first occurrence is
+  `422 BLOCK_NO_OCCURRENCE`. The occurrence carries
   `tasks: []` and `trace: null` until those slices exist. It does not read the
   session (decision 16).
 - **Edit scope** is `onlyThis` or `thisAndFuture`, and is ignored for a
@@ -374,6 +397,8 @@ request turns out to be slow.
 | 17 | `PATCH /me` with only `timeZone` needs no `version` and is last-write-wins, because it's a fact the device reports, not an edit. A `409 STALE_VERSION` carries the current resource in `error.meta.current`, the one object-valued `meta` key. A write that changes nothing doesn't bump `version`. |
 | 18 | `DELETE /me` needs a live session, so a revoked device's access token can't delete the account. A retry after the account is gone gets `401 TOKEN_INVALID` rather than 204. The email's sign-in code row is deleted too. No re-authentication is required. Every user-owned table cascades from `users`, so the delete stays a single statement plus the email-keyed cleanup. |
 | 19 | Idempotent creates use `INSERT … ON CONFLICT (user_id, idempotency_key) DO NOTHING` and then a select. A retry, even a concurrent one, gets the original with 201, and its body is not compared with the original's. The loser of a race waits for the winner's commit, so there is no in-progress case. A recurrence is stored with explicit days: the server fills in an empty `weekdays`/`monthDays` from the anchor date. |
+| 20 | A series' anchor (the `date` it was created with) is an occurrence only if the recurrence lands on it, as in the app. `POST /blocks` returns the first real occurrence, and refuses with `422 BLOCK_NO_OCCURRENCE` a series that would have none. |
+| 21 | `GET /days` expands recurrences in memory from one query per request, and the range form ships with the single-day form. A block's midnight tail is listed on the following day with its start `date`. |
 
 ## 11. Error codes to add
 
@@ -387,6 +412,7 @@ Append these to `src/core/http/error-code.ts`:
 | `CODE_ATTEMPTS_EXHAUSTED` | 429 | 5 wrong attempts. The user must request a new code. **Added.** |
 | `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired, revoked or reused. **Added** (refresh, auth guard). |
 | `BLOCK_TOO_SHORT` | 422 | BLK-05. **Added** (`POST /blocks`). `BLOCK_TOO_LONG` was dropped: minute-of-day start and end can't describe more than 24 hours. |
+| `BLOCK_NO_OCCURRENCE` | 422 | A repeating block whose `until` comes before the first day its rule lands on. **Added** (`POST /blocks`, decision 20). |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task, or `recurrence` on a task in a block. |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. **Not needed so far:** a create that inserts in one statement never exposes an unfinished original (decision 19). Add it only for a create that holds its insert open inside a longer transaction. |
 

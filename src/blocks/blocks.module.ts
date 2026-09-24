@@ -7,5 +7,7 @@ import { BlocksService } from './blocks.service';
 @Module({
   controllers: [BlocksController],
   providers: [BlocksService, BlocksRepository],
+  // `DaysModule` reads series to lay out a day.
+  exports: [BlocksRepository],
 })
 export class BlocksModule {}

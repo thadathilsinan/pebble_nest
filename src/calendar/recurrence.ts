@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { RECURRENCE_KINDS, type RecurrenceKind } from '../core/database/schema';
-import { dayOfMonth, isoWeekday, localDate } from './local-date';
+import {
+  addDays,
+  dayOfMonth,
+  daysInMonth,
+  isoWeekday,
+  localDate,
+} from './local-date';
 
 /**
  * `Recurrence` in `docs/api-plan.md` §1, as it travels on the wire. Blocks use
@@ -102,4 +108,63 @@ export function resolveRecurrence(
         : [],
     until: input.until ?? null,
   };
+}
+
+/**
+ * Whether a series anchored on `anchor` has an occurrence on `date`, as the app
+ * reads it (`Recurrence.occursOn` in pebble_ui). The anchor itself counts only
+ * when it fits the rule: a weekly series of Mondays anchored on a Wednesday
+ * starts on the Monday after.
+ *
+ * `date` and `anchor` are `YYYY-MM-DD`, so comparing them as strings compares
+ * them as dates.
+ */
+export function occursOn(
+  recurrence: Recurrence,
+  anchor: string,
+  date: string,
+): boolean {
+  if (date < anchor) return false;
+  if (recurrence.until !== null && date > recurrence.until) return false;
+
+  switch (recurrence.kind) {
+    case 'none':
+      return date === anchor;
+    case 'daily':
+      return true;
+    case 'weekly':
+      return recurrence.weekdays.includes(isoWeekday(date));
+    case 'monthly': {
+      // REC-02: the 31st lands on the 30th, or the 28th, as the month allows.
+      const last = daysInMonth(date);
+      const day = dayOfMonth(date);
+      return recurrence.monthDays.some((d) => Math.min(d, last) === day);
+    }
+  }
+}
+
+/**
+ * The longest gap between two occurrences of any repeating series: a monthly
+ * one on the 31st only, from 31 January to 31 March, is 59 days. Searching this
+ * far from any date finds the next occurrence if there is one.
+ */
+const LONGEST_GAP_DAYS = 62;
+
+/**
+ * The first date on or after `from` on which the series occurs, or null when
+ * there is none: `until` comes first, or a one-off block's date has passed.
+ */
+export function firstOccurrenceFrom(
+  recurrence: Recurrence,
+  anchor: string,
+  from: string,
+): string | null {
+  let date = from < anchor ? anchor : from;
+  for (let i = 0; i <= LONGEST_GAP_DAYS; i++) {
+    if (recurrence.until !== null && date > recurrence.until) return null;
+    if (occursOn(recurrence, anchor, date)) return date;
+    if (recurrence.kind === 'none') return null;
+    date = addDays(date, 1);
+  }
+  return null;
 }

@@ -110,6 +110,49 @@ describe('BlocksRepository (integration)', () => {
     expect(rows).toHaveLength(0);
   });
 
+  describe('findActiveBetween', () => {
+    it('returns the owner’s series begun by `to` and not ended before `from`', async () => {
+      const userId = await newUser();
+      const other = await newUser('them@example.com');
+      const daily = { recurrenceKind: 'daily' as const };
+
+      const inRange = await repo.create(t.db, block(userId));
+      const endsOnFrom = await repo.create(
+        t.db,
+        block(userId, {
+          ...daily,
+          anchorDate: '2026-09-01',
+          until: '2026-09-20',
+        }),
+      );
+      const endless = await repo.create(
+        t.db,
+        block(userId, { ...daily, anchorDate: '2026-01-01' }),
+      );
+      await repo.create(t.db, block(userId, { anchorDate: '2026-09-26' }));
+      await repo.create(
+        t.db,
+        block(userId, {
+          ...daily,
+          anchorDate: '2026-09-01',
+          until: '2026-09-19',
+        }),
+      );
+      await repo.create(t.db, block(other));
+
+      const rows = await repo.findActiveBetween(
+        t.db,
+        userId,
+        '2026-09-20',
+        '2026-09-25',
+      );
+
+      expect(rows.map((r) => r.id).sort()).toEqual(
+        [inRange.row.id, endsOnFrom.row.id, endless.row.id].sort(),
+      );
+    });
+  });
+
   describe('check constraints', () => {
     it.each([
       ['ck_block_series_min_length', { startMin: 600, endMin: 603 }],

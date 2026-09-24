@@ -45,7 +45,10 @@ export type ErrorCode =
   | 'STALE_VERSION'
   // BLK-05: a block shorter than 5 minutes. There is no BLOCK_TOO_LONG: a start
   // and end in minutes of the day cannot describe more than 24 hours.
-  | 'BLOCK_TOO_SHORT';
+  | 'BLOCK_TOO_SHORT'
+  // A repeating block whose rule never lands on a day between its date and
+  // its `until`, so it would never appear on any day.
+  | 'BLOCK_NO_OCCURRENCE';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted

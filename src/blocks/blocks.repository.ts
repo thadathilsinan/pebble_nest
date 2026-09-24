@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gte, isNull, lte, or } from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
 import { blockSeries, type BlockSeriesRow } from '../core/database/schema';
 
@@ -70,5 +70,32 @@ export class BlocksRepository {
     }
 
     return { row: existing, created: false };
+  }
+
+  /**
+   * The user's series that may have an occurrence starting between `from` and
+   * `to`, both inclusive: begun by `to`, and not ended before `from`. Which
+   * days in the range each one lands on is `occursOn`'s job, not SQL's.
+   *
+   * Uses `uq_block_series_user_id_idempotency_key`, which leads with
+   * `user_id`. A user's series are few enough that filtering the dates after
+   * that is cheap; an index on `(user_id, anchor_date)` is the step up if not.
+   */
+  findActiveBetween(
+    ex: Executor,
+    userId: string,
+    from: string,
+    to: string,
+  ): Promise<BlockSeriesRow[]> {
+    return ex
+      .select()
+      .from(blockSeries)
+      .where(
+        and(
+          eq(blockSeries.userId, userId),
+          lte(blockSeries.anchorDate, to),
+          or(isNull(blockSeries.until), gte(blockSeries.until, from)),
+        ),
+      );
   }
 }

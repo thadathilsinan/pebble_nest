@@ -4,10 +4,15 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
-import { resolveRecurrence } from '../calendar/recurrence';
+import { firstOccurrenceFrom, resolveRecurrence } from '../calendar/recurrence';
 import { DB, type Db } from '../core/database/database.module';
+import type { BlockSeriesRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
-import { toBlockOccurrence, type BlockOccurrence } from './blocks.mapper';
+import {
+  recurrenceOf,
+  toBlockOccurrence,
+  type BlockOccurrence,
+} from './blocks.mapper';
 import { BlocksRepository } from './blocks.repository';
 import type { CreateBlockBody } from './dto/create-block.dto';
 
@@ -22,7 +27,9 @@ export class BlocksService {
   ) {}
 
   /**
-   * Creates a block series and returns its first occurrence, on `date`.
+   * Creates a block series and returns its first occurrence: the first day on
+   * or after `date` that the recurrence lands on. That is `date` itself unless
+   * the rule skips it, e.g. a weekly block of Mondays created on a Wednesday.
    *
    * A retry carrying the same `idempotencyKey` returns the series the first
    * request created, as that request would have, whatever the retry's body
@@ -43,6 +50,12 @@ export class BlocksService {
     }
 
     const recurrence = resolveRecurrence(body.recurrence, body.date);
+    if (firstOccurrenceFrom(recurrence, body.date, body.date) === null) {
+      throw new UnprocessableEntityException({
+        code: 'BLOCK_NO_OCCURRENCE' satisfies ErrorCode,
+        message: 'The repeat ends before the block falls on any day.',
+      });
+    }
 
     const { row } = await this.blocks.create(this.db, {
       userId: caller.userId,
@@ -58,7 +71,9 @@ export class BlocksService {
       idempotencyKey: body.idempotencyKey,
     });
 
-    return toBlockOccurrence(row, row.anchorDate);
+    // Recomputed from the row, not the body: a replay returns the series the
+    // first request stored, whatever the retry sent.
+    return toBlockOccurrence(row, firstOccurrenceOf(row));
   }
 }
 
@@ -68,4 +83,18 @@ export class BlocksService {
  */
 export function lengthInMinutes(startMin: number, endMin: number): number {
   return endMin > startMin ? endMin - startMin : 1440 - startMin + endMin;
+}
+
+/**
+ * The series' first occurrence. Every stored series has one: `create` refuses
+ * a recurrence that never lands before its `until`.
+ */
+function firstOccurrenceOf(row: BlockSeriesRow): string {
+  const date = firstOccurrenceFrom(
+    recurrenceOf(row),
+    row.anchorDate,
+    row.anchorDate,
+  );
+  if (date === null) throw new Error(`block series ${row.id} never occurs`);
+  return date;
 }

@@ -130,6 +130,31 @@ describe('POST /blocks (e2e)', () => {
     });
   });
 
+  it('returns the first day the repeat lands on, not the date sent', async () => {
+    // 2026-09-24 is a Thursday; the first Monday after it is the 28th.
+    const res = await postBlock({
+      ...deepWork,
+      recurrence: { kind: 'weekly', weekdays: [1] },
+    }).expect(201);
+
+    expect((res.body as { data: { date: string } }).data.date).toBe(
+      '2026-09-28',
+    );
+  });
+
+  it('refuses a repeat that ends before it lands on any day', async () => {
+    const res = await postBlock({
+      ...deepWork,
+      recurrence: { kind: 'weekly', weekdays: [1], until: '2026-09-27' },
+    }).expect(422);
+
+    expect(res.body).toEqual({
+      error: { code: 'BLOCK_NO_OCCURRENCE', message: anyString },
+    });
+    const { rows } = await pool.query('SELECT 1 FROM block_series');
+    expect(rows).toHaveLength(0);
+  });
+
   it('accepts a block crossing midnight and a full-day block', async () => {
     await postBlock({ ...deepWork, startMin: 1350, endMin: 30 }).expect(201);
     await postBlock({ ...deepWork, startMin: 540, endMin: 540 }).expect(201);
