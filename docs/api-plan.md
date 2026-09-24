@@ -118,6 +118,12 @@ Profile = {
 }
 ```
 
+- **The record fields** are built with `GET /review`, on every `Profile`
+  (sign-in, refresh, `/me`). `firstRecordedDay` is the earliest block anchor,
+  task date or ledger day. `hasAnyRecord` is whether any block or task exists,
+  as the app computes it, so a deleted task's ledger days can set
+  `firstRecordedDay` while `hasAnyRecord` is `false`.
+
 - **Auth model:** a short-lived access JWT (about 15 minutes) sent as `Bearer`,
   plus a long-lived, rotating, opaque refresh token for each device.
 - **Every route outside `/auth/*` and `/health/*` needs the access token.** A
@@ -568,20 +574,24 @@ Screen: Review.
 
 | Method | Path | Query | Response |
 |---|---|---|---|
-| GET | `/review` | `from`, `to` | `Review` |
+| GET | `/review` | `from`, `to` (no cap) | `Review`. **Built.** See below. |
 
 ```jsonc
 Review = {
   "from", "to",
   "completed", "incomplete",   // incomplete includes carried over and missed (DSH-02)
   "completionRate": number | null, // null when nothing was recorded (DSH-03)
-  "byName": [{ "name", "hours", "trace" }], // DSH-04, largest first
-  "skippedHours",
-  "coveredHours",
+  "byName": [{ "name", "minutes", "trace" }], // DSH-04, largest first
+  "skippedMinutes",
+  "coveredMinutes",
   "split": { "elapsedMinutes", "blockedMinutes", "skippedMinutes" }, // each minute counted once
   "mostCarried": [Task]        // top 5, DSH-05
 }
 ```
+
+Durations are whole minutes; the client divides by 60 to show hours. `name`
+is the first spelling the period met, and `trace` is the chosen trace, or
+`null` for the name's default, as on `BlockOccurrence`.
 
 - **DSH-04, time per block name:**
   - totals are by name, ignoring capitals and spaces
@@ -597,6 +607,23 @@ Review = {
   entry on any day of the period, or it currently sits on a day in the period.
   A task carried all through a past week therefore shows in that week, even though
   it now sits on today. Ranked by `carryCount`, top 5.
+
+**Built.** Decision 32 records the rulings.
+
+- **Range:** `from` and `to` are both included, with no cap; only `to < from`
+  is `400 VALIDATION_FAILED`. Blocks are laid out only from `firstRecordedDay`
+  to today (`DaysService.listBlocks`, which reads no task), so a request
+  reaching back to 1900 costs no more than the account's age.
+  `split.elapsedMinutes` still counts every passed minute of the range.
+- **Now** is the user's local date and minute in their time zone (UTC before
+  the device reports one), so the route reads the user: a deleted account's
+  token gets `401 TOKEN_INVALID`. It does not read the session.
+- **Split:** per day, the union of the blocks that happened is blocked, and
+  the union of all blocks minus that is skipped. Each minute counts once.
+- **Ledger:** one `count(*) FILTER` over `task_ledger_entries` by
+  `idx_task_ledger_entries_user_id_day`. A deleted task's days still count.
+- **`mostCarried`:** only tasks with `carryCount > 0`, as in the app. Ties go by
+  title (lower-cased, by code unit), then id.
 
 ## 9. Now screen
 
@@ -641,6 +668,7 @@ request turns out to be slow.
 | 29 | Deleting a block occurrence marks it `deleted` in `block_occurrence_exceptions`, for good. `scope=series` deletes every occurrence from today on **and the occurrence named, even a past one**, so the block the user tapped always goes; this departs from the app, which ends the series the day before the named occurrence. A deleted occurrence's open tasks on a closed day carry forward to today, as skip's do (decision 28). A deleted occurrence is `404 NOT_FOUND` wherever it is named, while a date the rule never lands on stays `422 BLOCK_NOT_ON_DATE`. A series with nothing left before today is deleted rather than ended. |
 | 30 | `PATCH /blocks/{seriesId}/occurrences/{date}` checks the series' one `version`, and an `onlyThis` override bumps it, so another device's edit to a different occurrence of the same series gets a 409 and refetches; there is no version per occurrence. Editing the first occurrence with `thisAndFuture` edits the series in place, as the app does. Tasks in occurrences a new rule drops move to their own day's general list (BLK-10) rather than being orphaned as in the app. Moving the first occurrence to a date its rule doesn't land on is `422 BLOCK_NOT_ON_DATE`, not a re-derived rule. `newDate` with `thisAndFuture` past the first occurrence is `400`. A block moved onto a closed day carries its open tasks to today (decision 26). |
 | 31 | `GET /notifications/schedule` builds block alerts from `DaysService.list`, so an alert follows everything the Day screen shows, and reads task reminders by the reminder's own date through a partial index on open tasks. It returns the whole window, times already past included, and leaves dropping those to the phone, so the server needs no notion of "now" here. A midnight tail has no alert. Missed tasks are left out. |
+| 32 | `GET /review` has no range cap, since the UI's custom range reaches back to `firstRecordedDay`. It lays blocks out only from `firstRecordedDay` to today, which leaves the result unchanged, because an occurrence moved on its own becomes a one-off series anchored on its new date. Durations are whole minutes on the wire rather than float hours. `mostCarried` ranks only tasks carried at least once, as the app does. `Profile.firstRecordedDay` and `hasAnyRecord` are real from this slice on, on every `Profile` the API returns. |
 
 ## 11. Error codes to add
 
@@ -674,6 +702,8 @@ These decisions add behaviour the UI doesn't have yet:
   time zone on app open
 - scheduling local notifications from `/notifications/schedule`, dropping
   times already past
+- reading `/review` durations as minutes (`minutes`, `skippedMinutes`,
+  `coveredMinutes`) and dividing by 60 for display
 
 ## 13. Still to set up (not blocking)
 

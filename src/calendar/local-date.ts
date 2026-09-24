@@ -15,9 +15,10 @@ export const localDate = z.iso
 
 /**
  * `?from=&to=`: a range of local dates, both ends included, of at most
- * `maxDays` days. `to` before `from`, or a longer span, is a 400.
+ * `maxDays` days, or of any length without it. `to` before `from`, or a
+ * longer span, is a 400.
  */
-export function localDateRange(maxDays: number) {
+export function localDateRange(maxDays = Infinity) {
   return z
     .object({ from: localDate, to: localDate })
     .superRefine(({ from, to }, ctx) => {
@@ -79,6 +80,28 @@ export function todayIn(timeZone: string, now: Date = new Date()): string {
     month: '2-digit',
     day: '2-digit',
   }).format(now);
+}
+
+/**
+ * The calendar date and the minute of that day (0..1439) at `now` in the IANA
+ * `timeZone`. `h23` so midnight reads as hour 0, never 24.
+ */
+export function nowIn(
+  timeZone: string,
+  now: Date = new Date(),
+): { date: string; minute: number } {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now);
+  const part = (type: 'hour' | 'minute') =>
+    Number(parts.find((p) => p.type === type)?.value);
+  return {
+    date: todayIn(timeZone, now),
+    minute: part('hour') * 60 + part('minute'),
+  };
 }
 
 /**

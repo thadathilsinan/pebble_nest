@@ -1,5 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, not, or, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  lte,
+  ne,
+  not,
+  or,
+  sql,
+} from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
 import {
   taskLedgerEntries,
@@ -352,6 +364,79 @@ export class TasksRepository {
    * task's. Uses `idx_tasks_user_id_reminder_date`, whose predicate `NOT done`
    * repeats here so the planner can match it.
    */
+  /**
+   * What the user's ledger recorded from `from` to `to`, both included (DSH-02).
+   * `incomplete` counts missed days too. A deleted task's days still count:
+   * its entries outlive it.
+   */
+  async countLedgerBetween(
+    ex: Executor,
+    userId: string,
+    from: string,
+    to: string,
+  ): Promise<{ completed: number; incomplete: number }> {
+    const [counts] = await ex
+      .select({
+        completed: sql<number>`count(*) FILTER (WHERE ${taskLedgerEntries.outcome} = 'completed')::int`,
+        incomplete: sql<number>`count(*) FILTER (WHERE ${taskLedgerEntries.outcome} <> 'completed')::int`,
+      })
+      .from(taskLedgerEntries)
+      .where(
+        and(
+          eq(taskLedgerEntries.userId, userId),
+          gte(taskLedgerEntries.day, from),
+          lte(taskLedgerEntries.day, to),
+        ),
+      );
+    return counts ?? { completed: 0, incomplete: 0 };
+  }
+
+  /**
+   * DSH-05: the user's most carried tasks among those active from `from` to
+   * `to` (decision 4). A task is active if a day of the period recorded it
+   * incomplete or missed, or it sits on one of those days now. Only tasks
+   * carried at least once rank, as in the app. Ties go by title, lower-cased
+   * and compared by code unit as `compareTasks` does, then by id.
+   */
+  findMostCarried(
+    ex: Executor,
+    userId: string,
+    from: string,
+    to: string,
+    limit: number,
+  ): Promise<TaskRow[]> {
+    const carriedInPeriod = ex
+      .select({ taskId: taskLedgerEntries.taskId })
+      .from(taskLedgerEntries)
+      .where(
+        and(
+          eq(taskLedgerEntries.userId, userId),
+          gte(taskLedgerEntries.day, from),
+          lte(taskLedgerEntries.day, to),
+          ne(taskLedgerEntries.outcome, 'completed'),
+        ),
+      );
+    return ex
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.userId, userId),
+          gt(tasks.carryCount, 0),
+          or(
+            and(gte(tasks.date, from), lte(tasks.date, to)),
+            inArray(tasks.id, carriedInPeriod),
+          ),
+        ),
+      )
+      .orderBy(
+        desc(tasks.carryCount),
+        sql`lower(${tasks.title}) COLLATE "C"`,
+        tasks.id,
+      )
+      .limit(limit);
+  }
+
   findOpenRemindersBetween(
     ex: Executor,
     userId: string,

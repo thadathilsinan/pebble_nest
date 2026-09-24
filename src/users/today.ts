@@ -1,5 +1,5 @@
 import { accessTokenInvalid } from '../auth/errors';
-import { todayIn } from '../calendar/local-date';
+import { nowIn, todayIn } from '../calendar/local-date';
 import type { UserRow } from '../core/database/schema';
 
 /**
@@ -16,4 +16,13 @@ const FALLBACK_TIME_ZONE = 'UTC';
 export function todayFor(user: UserRow | null): string {
   if (user === null) throw accessTokenInvalid();
   return todayIn(user.timeZone ?? FALLBACK_TIME_ZONE);
+}
+
+/**
+ * The user's local date and minute of the day, for what has passed so far
+ * today. Refused, as `todayFor` is, when the account is gone.
+ */
+export function nowFor(user: UserRow | null): { date: string; minute: number } {
+  if (user === null) throw accessTokenInvalid();
+  return nowIn(user.timeZone ?? FALLBACK_TIME_ZONE);
 }

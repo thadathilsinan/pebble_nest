@@ -3,6 +3,7 @@ import {
   daysBetween,
   daysInMonth,
   localDateTime,
+  nowIn,
   todayIn,
 } from './local-date';
 
@@ -33,6 +34,20 @@ describe('local dates', () => {
     expect(todayIn('UTC', now)).toBe('2026-09-24');
     expect(todayIn('Asia/Kolkata', now)).toBe('2026-09-25');
     expect(todayIn('America/Los_Angeles', now)).toBe('2026-09-24');
+  });
+
+  it('reads the local date and minute of the day in a time zone', () => {
+    const now = new Date('2026-09-24T20:30:00Z');
+    expect(nowIn('UTC', now)).toEqual({ date: '2026-09-24', minute: 1230 });
+    expect(nowIn('Asia/Kolkata', now)).toEqual({
+      date: '2026-09-25',
+      minute: 120,
+    });
+    // Midnight is minute 0 of the new day, not 24:00 of the old one.
+    expect(nowIn('UTC', new Date('2026-09-24T00:00:00Z'))).toEqual({
+      date: '2026-09-24',
+      minute: 0,
+    });
   });
 
   it('formats a date and minutes as a local date-time', () => {

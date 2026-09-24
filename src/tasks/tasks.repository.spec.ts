@@ -390,4 +390,122 @@ describe('TasksRepository (integration)', () => {
 
     expect(rows.map((r) => r.title).sort()).toEqual(['From', 'To']);
   });
+
+  describe('the review’s reads', () => {
+    async function withLedger(
+      userId: string,
+      extra: Partial<NewTask>,
+      outcomes: [day: string, outcome: 'completed' | 'incomplete' | 'missed'][],
+    ) {
+      const { row } = await repo.create(t.db, task(userId, extra));
+      if (outcomes.length > 0) {
+        await t.db.insert(taskLedgerEntries).values(
+          outcomes.map(([day, outcome]) => ({
+            userId,
+            taskId: row.id,
+            day,
+            outcome,
+            title: row.title,
+          })),
+        );
+      }
+      return row;
+    }
+
+    it('counts the ledger in the range by outcome, missed as incomplete', async () => {
+      const me = await newUser();
+      const other = await newUser('other@example.com');
+      await withLedger(me, { title: 'A' }, [
+        ['2026-09-20', 'incomplete'],
+        ['2026-09-21', 'incomplete'],
+        ['2026-09-22', 'completed'],
+      ]);
+      await withLedger(me, { title: 'B' }, [
+        ['2026-09-21', 'missed'],
+        ['2026-09-23', 'completed'],
+      ]);
+      await withLedger(other, { title: 'C' }, [['2026-09-21', 'completed']]);
+
+      expect(
+        await repo.countLedgerBetween(t.db, me, '2026-09-21', '2026-09-22'),
+      ).toEqual({ completed: 1, incomplete: 2 });
+      expect(
+        await repo.countLedgerBetween(t.db, me, '2026-10-01', '2026-10-31'),
+      ).toEqual({ completed: 0, incomplete: 0 });
+    });
+
+    it('keeps a deleted task’s days in the count', async () => {
+      const me = await newUser();
+      const row = await withLedger(me, {}, [['2026-09-21', 'incomplete']]);
+      await repo.delete(t.db, me, row.id);
+
+      expect(
+        await repo.countLedgerBetween(t.db, me, '2026-09-21', '2026-09-21'),
+      ).toEqual({ completed: 0, incomplete: 1 });
+    });
+
+    it('finds the most carried tasks active in the period, top first', async () => {
+      const me = await newUser();
+      const other = await newUser('other@example.com');
+      // Carried through the period and on out of it.
+      await withLedger(
+        me,
+        { title: 'Left', date: '2026-10-05', carryCount: 9 },
+        [['2026-09-22', 'incomplete']],
+      );
+      // Sits in the period now.
+      await withLedger(
+        me,
+        { title: 'Here', date: '2026-09-22', carryCount: 3 },
+        [],
+      );
+      // Carried, but only before the period.
+      await withLedger(
+        me,
+        { title: 'Before', date: '2026-10-05', carryCount: 7 },
+        [['2026-09-10', 'incomplete']],
+      );
+      // Only completed in the period.
+      await withLedger(
+        me,
+        { title: 'Done', date: '2026-10-05', carryCount: 5 },
+        [['2026-09-22', 'completed']],
+      );
+      // In the period, never carried.
+      await withLedger(me, { title: 'Fresh', date: '2026-09-22' }, []);
+      await withLedger(
+        other,
+        { title: 'Theirs', date: '2026-09-22', carryCount: 8 },
+        [],
+      );
+
+      const rows = await repo.findMostCarried(
+        t.db,
+        me,
+        '2026-09-21',
+        '2026-09-27',
+        5,
+      );
+
+      expect(rows.map((r) => r.title)).toEqual(['Left', 'Here']);
+    });
+
+    it('ranks ties by title, ignoring capitals, and keeps to the limit', async () => {
+      const me = await newUser();
+      for (const title of ['delta', 'Charlie', 'bravo', 'Alpha']) {
+        await withLedger(me, { title, carryCount: 2 }, []);
+      }
+      await withLedger(me, { title: 'Zulu', carryCount: 4 }, []);
+
+      const rows = await repo.findMostCarried(
+        t.db,
+        me,
+        '2026-09-24',
+        '2026-09-24',
+        3,
+      );
+
+      expect(rows.map((r) => r.title)).toEqual(['Zulu', 'Alpha', 'bravo']);
+    });
+  });
 });
