@@ -295,6 +295,34 @@ function isConnectionFailure(
   );
 }
 
+/**
+ * How many `cause` links `unwrap` follows. One is all Drizzle adds today; the
+ * bound only stops a cyclic chain from spinning forever.
+ */
+const MAX_CAUSE_DEPTH = 5;
+
+/**
+ * The driver's own error, if `exception` wraps one; otherwise `exception`.
+ *
+ * Drizzle rethrows every failed query as a `DrizzleQueryError` whose message
+ * is the SQL and whose `cause` is what `pg` threw, so the SQLSTATE and
+ * `severity` this file reads sit one level down. Matched structurally, down
+ * the `cause` chain, rather than with `instanceof DrizzleQueryError`, for the
+ * reason `DriverErrorLike` gives, and so a second wrapper added later is
+ * followed too.
+ */
+function unwrap(exception: unknown): unknown {
+  let current = exception;
+
+  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth++) {
+    if (isDriverError(current) || isConnectionFailure(current)) return current;
+    if (!(current instanceof Error)) break;
+    current = current.cause;
+  }
+
+  return exception;
+}
+
 /** Only the keys that are actually present, so no `undefined`s reach the log. */
 function contextOf(error: DriverErrorLike): DriverContext {
   const context: DriverContext = { sqlstate: error.code };
@@ -343,10 +371,11 @@ function contextOf(error: DriverErrorLike): DriverContext {
 export function uniqueViolation(
   exception: unknown,
 ): { constraint: string | undefined } | undefined {
-  if (!isDriverError(exception)) return undefined;
-  if (exception.code !== UNIQUE_VIOLATION) return undefined;
+  const error = unwrap(exception);
+  if (!isDriverError(error)) return undefined;
+  if (error.code !== UNIQUE_VIOLATION) return undefined;
 
-  return { constraint: exception.constraint };
+  return { constraint: error.constraint };
 }
 
 /**
@@ -360,6 +389,8 @@ export function uniqueViolation(
 export function describeDriverError(
   exception: unknown,
 ): DriverFailure | undefined {
+  exception = unwrap(exception);
+
   if (isDriverError(exception)) {
     const rejection =
       REJECTION_BY_SQLSTATE[exception.code] ??
