@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { AuthModule } from './auth/auth.module';
 import { BlockNamesModule } from './block-names/block-names.module';
+import { BlockOccurrencesModule } from './block-occurrences/block-occurrences.module';
 import { BlocksModule } from './blocks/blocks.module';
 import { AppConfigModule } from './core/config/config.module';
 import { DatabaseModule } from './core/database/database.module';
@@ -32,6 +33,7 @@ import { ZodValidationPipe } from './core/validation/validation.pipe';
     AuthModule,
     MeModule,
     BlocksModule,
+    BlockOccurrencesModule,
     BlockNamesModule,
     DaysModule,
     TasksModule,

@@ -185,8 +185,8 @@ Screens: block slip, block sheet.
 | POST | `/blocks` | `{ name, date, startMin, endMin, recurrence?, alert, idempotencyKey? }` | `BlockOccurrence` (201). **Built.** See below. |
 | PATCH | `/blocks/{seriesId}/occurrences/{date}` | `{ version, scope, name?, startMin?, endMin?, newDate?, recurrence?, alert? }` | `BlockOccurrence` |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}` | `?scope=onlyThis\|series` | `{ movedTaskCount }` (200) |
-| POST | `/blocks/{seriesId}/occurrences/{date}/skip` | — | `{ movedTaskCount }` |
-| DELETE | `/blocks/{seriesId}/occurrences/{date}/skip` | — | 204 |
+| POST | `/blocks/{seriesId}/occurrences/{date}/skip` | — | `{ movedTaskCount }` (200). **Built.** See below. |
+| DELETE | `/blocks/{seriesId}/occurrences/{date}/skip` | — | 204. **Built.** See below. |
 | GET | `/block-names` | `?q=` | `{ items: [string] }`. **Built.** See below. |
 | PUT | `/block-names/{name}/trace` | `{ trace }` | 204. **Built.** See below. |
 
@@ -231,6 +231,27 @@ Screens: block slip, block sheet.
 - **Skip:** open tasks move to the general list, and repeating ones split off as
   one-offs (BLK-07). Un-skipping restores the status; tasks already moved stay
   where they are (BLK-08).
+- **Skip (built):** `date` is the day the occurrence starts. An id that isn't a
+  UUID or a date that isn't `YYYY-MM-DD` is `400 VALIDATION_FAILED`; an unknown
+  series, or someone else's, is `404 NOT_FOUND`; a date the series doesn't fall
+  on is `422 BLOCK_NOT_ON_DATE`. The answer is 200, not 201: nothing is
+  created. There is no `version` and the last write wins, as with
+  `/tasks/{id}/done`, and skipping doesn't bump `seriesVersion`. The
+  occurrence's open tasks move to that day's general list, each bumping its
+  `version`; done tasks stay in the block. **An open task on a closed day
+  carries forward at once**, as `/tasks/{id}/move` carries one (decision 26):
+  to today's general list, `carryCount` up by the days passed, and an
+  `incomplete` entry for each closed day from `date` to yesterday.
+  `movedTaskCount` counts those too. Skipping again answers 200 with whatever
+  arrived since, normally 0. The open tasks are locked, so two devices
+  skipping at once move each task once. A deleted account's token gets
+  `401 TOKEN_INVALID`, because skip reads the user's time zone.
+- **Un-skip (built):** the same 400, 404 and 422 checks. It deletes the
+  occurrence's exception row, so un-skipping an occurrence that isn't skipped
+  is also 204. It reads no user row, so a deleted account's token gets 404.
+  Neither reads the session (decision 16).
+- **On the timeline**, a skipped occurrence has `skipped: true`, and so does
+  its midnight tail on the next day.
 - **`GET /block-names` (built):** names used before, most recently used first,
   at most 6 (BLK-02). One entry per name ignoring capitals and surrounding
   spaces, spelt as the most recently created block spelt it. "Recently used" is
@@ -524,6 +545,7 @@ request turns out to be slow.
 | 25 | Renaming a task renames its ledger entries too, past days included, so the history shows the task's current title. This departs from the app, which keeps the title each entry was written with. `PATCH /tasks/{id}` reads no user row, so a deleted account's token gets 404 there. |
 | 26 | `POST /tasks/{id}/move` carries no `version` and is last-write-wins, like `/done`. A done task's `completed` entry moves with it. An open task moved onto a closed day carries forward at once (decision 2). A closed day that already recorded the task keeps its entry (`ON CONFLICT DO NOTHING`), and `carryCount` counts the carry again. `DELETE /tasks/{id}` ignores `scope` for a one-off, as the app does, and gets 404 on a retry. |
 | 27 | Block-name traces live in `block_name_traces`, keyed by the name trimmed and lower-cased in JavaScript, with no `version`. The server ports the app's default-trace hash (32-bit FNV-1a over UTF-16 code units, modulo the app's 9 traces; `src/block-names/block-name.ts`), so choosing the default deletes the row, as the app's `chooseTraceForName` does. A name whose default is `open` keeps any choice once made, as in the app. `PUT` is kept over the `PATCH` that adding-a-feature §4.4 prefers, since each request replaces the whole resource. JavaScript and Dart lower-case a few characters differently; that is accepted. `GET /block-names` counts every series, ended ones included. |
+| 28 | A per-occurrence change lives in `block_occurrence_exceptions`, one row per series and start date, keyed `(block_series_id, date)`, which holds only `skipped` until occurrence edit and delete add their columns. Un-skipping deletes the row. Skip and un-skip are their own module (`src/block-occurrences/`), since skipping moves tasks and `TasksModule` already imports `BlocksModule`. `POST …/skip` answers 200, since it is an action rather than a create. Skipping a closed day's occurrence carries its open tasks to today, as `/move` does (decision 26), rather than leaving them on the closed day as the app would. |
 
 ## 11. Error codes to add
 

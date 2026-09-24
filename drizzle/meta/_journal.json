@@ -50,6 +50,13 @@
       "when": 1790244680834,
       "tag": "20260924101120_block_name_traces",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790245558334,
+      "tag": "20260924102558_block_occurrence_exceptions",
+      "breakpoints": true
     }
   ]
 }

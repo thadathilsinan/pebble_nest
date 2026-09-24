@@ -372,6 +372,65 @@ export const blockSeries = pgTable(
 
 export type BlockSeriesRow = typeof blockSeries.$inferSelect;
 
+/**
+ * What differs about one occurrence of a block series from the series itself:
+ * the occurrence that starts on `date`. A date with no row is the series as
+ * it stands.
+ *
+ * Only `skipped` so far (BLK-07/08). Editing and deleting one occurrence add
+ * their columns with their slices.
+ *
+ * No `version` or `idempotency_key`: skipping sets an absolute value, so the
+ * last write wins and a retry is harmless.
+ */
+export const blockOccurrenceExceptions = pgTable(
+  'block_occurrence_exceptions',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    userId: uuid('user_id').notNull(),
+    blockSeriesId: uuid('block_series_id').notNull(),
+    date: date('date', { mode: 'string' }).notNull(),
+    skipped: boolean('skipped').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Cascade: decision 18 — DELETE /me stays a single delete.
+    foreignKey({
+      name: 'fk_block_occurrence_exceptions_user_id',
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+    // Cascade: an exception means nothing without its series.
+    foreignKey({
+      name: 'fk_block_occurrence_exceptions_block_series_id',
+      columns: [table.blockSeriesId],
+      foreignColumns: [blockSeries.id],
+    }).onDelete('cascade'),
+    // One row per occurrence. It leads with `block_series_id`, so it is also
+    // that foreign key's index (schema-conventions §6).
+    uniqueIndex('uq_block_occurrence_exceptions_block_series_id_date').on(
+      table.blockSeriesId,
+      table.date,
+    ),
+    // GET /days reads a user's exceptions by date range; also the `user_id`
+    // foreign key's index.
+    index('idx_block_occurrence_exceptions_user_id_date').on(
+      table.userId,
+      table.date,
+    ),
+  ],
+);
+
+export type BlockOccurrenceExceptionRow =
+  typeof blockOccurrenceExceptions.$inferSelect;
+
 export const TASK_LEDGER_OUTCOMES = [
   'completed',
   'incomplete',

@@ -113,6 +113,34 @@ export class TasksRepository {
   }
 
   /**
+   * The open tasks in the occurrence of `blockSeriesId` that starts on
+   * `date`, locked until the transaction ends. A task another transaction
+   * moves out first is skipped over once that one commits, since Postgres
+   * rechecks the filter on a row it waited for. Uses
+   * `idx_tasks_block_series_id`.
+   */
+  findOpenInOccurrenceForUpdate(
+    ex: Executor,
+    userId: string,
+    blockSeriesId: string,
+    date: string,
+  ): Promise<TaskRow[]> {
+    return ex
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.userId, userId),
+          eq(tasks.blockSeriesId, blockSeriesId),
+          eq(tasks.date, date),
+          eq(tasks.done, false),
+        ),
+      )
+      .orderBy(tasks.id)
+      .for('update');
+  }
+
+  /**
    * Marks the task done, stamping `doneAt` with the database's clock, or
    * open again. A reopened task on a closed day is `carry`-ed in the same
    * write: to `carry.date`'s general list, `carry.days` carries further on.

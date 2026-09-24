@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
 import { chosenTraceFor, tracesByName } from '../block-names/block-name';
+import { BlockOccurrencesRepository } from '../block-occurrences/block-occurrences.repository';
 import { BlockNamesRepository } from '../block-names/block-names.repository';
 import { addDays } from '../calendar/local-date';
 import { occursOn } from '../calendar/recurrence';
@@ -31,30 +32,35 @@ export class DaysService {
     private readonly blocks: BlocksRepository,
     private readonly tasks: TasksRepository,
     private readonly names: BlockNamesRepository,
+    private readonly occurrences: BlockOccurrencesRepository,
   ) {}
 
   /**
    * Every day from `from` to `to`, both included, from one read each of the
-   * caller's series, their tasks and their chosen traces. It does not read the session
-   * (decision 16).
+   * caller's series, their tasks, their chosen traces and their skipped
+   * occurrences. It does not read the session (decision 16).
    */
   async list(caller: Caller, from: string, to: string): Promise<Day[]> {
     // The day before `from`, for the tails of blocks that began then and the
     // tasks those tails hold.
     const since = addDays(from, -1);
-    const [rows, taskRows, traceRows] = await Promise.all([
+    const [rows, taskRows, traceRows, skippedRows] = await Promise.all([
       this.blocks.findActiveBetween(this.db, caller.userId, since, to),
       this.tasks.findBetween(this.db, caller.userId, since, to),
       this.names.findTraces(this.db, caller.userId),
+      this.occurrences.findSkippedBetween(this.db, caller.userId, since, to),
     ]);
     const tasks = groupTasks(taskRows.map(toTask));
     const traces = tracesByName(traceRows);
+    const skipped = new Set(
+      skippedRows.map((row) => slot(row.blockSeriesId, row.date)),
+    );
 
     const days: Day[] = [];
     for (let date = from; date <= to; date = addDays(date, 1)) {
       days.push({
         date,
-        blocks: blocksOn(rows, date, tasks, traces),
+        blocks: blocksOn(rows, date, tasks, traces, skipped),
         generalList: tasks.get(slot(null, date)) ?? [],
       });
     }
@@ -86,13 +92,16 @@ function groupTasks(tasks: Task[]): Map<string, Task[]> {
 /**
  * The occurrences that start on `date`, plus the tails of those that started
  * the day before and cross midnight (BLK-04). A block ending exactly at
- * midnight has no tail: nothing of it falls on the next day.
+ * midnight has no tail: nothing of it falls on the next day. `skipped` holds
+ * the `slot`s of skipped occurrences, and a tail is skipped with its
+ * occurrence.
  */
 function blocksOn(
   rows: BlockSeriesRow[],
   date: string,
   tasks: Map<string, Task[]>,
   traces: ReadonlyMap<string, ChosenTrace>,
+  skipped: ReadonlySet<string>,
 ): BlockOccurrence[] {
   const yesterday = addDays(date, -1);
   const out: BlockOccurrence[] = [];
@@ -106,12 +115,23 @@ function blocksOn(
       occursOn(recurrence, row.anchorDate, yesterday)
     ) {
       // A tail holds the tasks of the occurrence it ends, as the app shows.
-      const held = tasks.get(slot(row.id, yesterday)) ?? [];
-      out.push(toBlockOccurrence(row, yesterday, trace, true, held));
+      const key = slot(row.id, yesterday);
+      out.push(
+        toBlockOccurrence(row, yesterday, trace, {
+          continuedFromPreviousDay: true,
+          tasks: tasks.get(key) ?? [],
+          skipped: skipped.has(key),
+        }),
+      );
     }
     if (occursOn(recurrence, row.anchorDate, date)) {
-      const held = tasks.get(slot(row.id, date)) ?? [];
-      out.push(toBlockOccurrence(row, date, trace, false, held));
+      const key = slot(row.id, date);
+      out.push(
+        toBlockOccurrence(row, date, trace, {
+          tasks: tasks.get(key) ?? [],
+          skipped: skipped.has(key),
+        }),
+      );
     }
   }
 

@@ -330,6 +330,43 @@ describe('TasksRepository (integration)', () => {
     });
   });
 
+  it('reads the open tasks of one occurrence, and only those', async () => {
+    const userId = await newUser();
+    const other = await newUser('other@example.com');
+    const { row: series } = await blocks.create(t.db, {
+      userId,
+      name: 'Deep work',
+      anchorDate: '2026-09-24',
+      startMin: 540,
+      endMin: 600,
+      recurrenceKind: 'daily',
+      weekdays: [],
+      monthDays: [],
+      until: null,
+      alert: false,
+    });
+    const inBlock = { blockSeriesId: series.id };
+    await repo.create(t.db, task(userId, { ...inBlock, title: 'Open' }));
+    const { row: done } = await repo.create(
+      t.db,
+      task(userId, { ...inBlock, title: 'Done' }),
+    );
+    await repo.setDone(t.db, done.id, true);
+    await repo.create(
+      t.db,
+      task(userId, { ...inBlock, title: 'Next day', date: '2026-09-25' }),
+    );
+    await repo.create(t.db, task(userId, { title: 'General' }));
+    // Not a real placement, but the filter on the owner must hold anyway.
+    await repo.create(t.db, task(other, { ...inBlock, title: 'Not mine' }));
+
+    const rows = await t.db.transaction((tx) =>
+      repo.findOpenInOccurrenceForUpdate(tx, userId, series.id, '2026-09-24'),
+    );
+
+    expect(rows.map((r) => r.title)).toEqual(['Open']);
+  });
+
   it('deletes only the user’s own task', async () => {
     const me = await newUser();
     const other = await newUser('other@example.com');

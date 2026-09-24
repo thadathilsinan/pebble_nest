@@ -34,14 +34,22 @@ export function recurrenceOf(row: BlockSeriesRow): Recurrence {
   };
 }
 
+/** What an occurrence has beyond its series, all absent by default. */
+export interface OccurrenceExtras {
+  /**
+   * Marks the copy of yesterday's midnight-crossing occurrence that a day's
+   * timeline shows as its tail (BLK-04). `date` is still the day it starts.
+   */
+  continuedFromPreviousDay?: boolean;
+  /** Already in the order the app shows them. */
+  tasks?: Task[];
+  /** BLK-07, from the occurrence's exception row. */
+  skipped?: boolean;
+}
+
 /**
- * The occurrence of `row` that starts on `date`, holding `tasks`, which the
- * caller has already put in order. With no exceptions table yet, every
- * occurrence is the series itself: not skipped, not edited.
- *
- * `continuedFromPreviousDay` marks the copy of yesterday's midnight-crossing
- * occurrence that a day's timeline shows as its tail (BLK-04). `date` is still
- * the day it starts.
+ * The occurrence of `row` that starts on `date`. Apart from `skipped`, an
+ * occurrence is the series itself: editing one occurrence comes later.
  *
  * `trace` is the one chosen for the series' name, or null for its default.
  */
@@ -49,8 +57,11 @@ export function toBlockOccurrence(
   row: BlockSeriesRow,
   date: string,
   trace: ChosenTrace | null,
-  continuedFromPreviousDay = false,
-  tasks: Task[] = [],
+  {
+    continuedFromPreviousDay = false,
+    tasks = [],
+    skipped = false,
+  }: OccurrenceExtras = {},
 ): BlockOccurrence {
   return {
     seriesId: row.id,
@@ -60,7 +71,7 @@ export function toBlockOccurrence(
     startMin: row.startMin,
     endMin: row.endMin,
     alert: row.alert,
-    skipped: false,
+    skipped,
     recurrence: recurrenceOf(row),
     trace,
     continuedFromPreviousDay,

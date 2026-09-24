@@ -6,15 +6,14 @@ import {
   NotImplementedException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { accessTokenInvalid } from '../auth/errors';
 import type { Caller } from '../auth/caller';
-import { recurrenceOf } from '../blocks/blocks.mapper';
+import { assertOccursOn } from '../blocks/block-occurrence';
 import { BlocksRepository } from '../blocks/blocks.repository';
-import { addDays, daysBetween, todayIn } from '../calendar/local-date';
-import { occursOn } from '../calendar/recurrence';
+import { addDays, daysBetween } from '../calendar/local-date';
 import { DB, type Db, type Executor } from '../core/database/database.module';
-import type { BlockSeriesRow, TaskRow } from '../core/database/schema';
+import type { TaskRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
+import { todayFor } from '../users/today';
 import { UsersRepository } from '../users/users.repository';
 import type { CreateTaskBody } from './dto/create-task.dto';
 import type { MoveTaskBody } from './dto/move-task.dto';
@@ -22,13 +21,6 @@ import type { SetTaskDoneBody } from './dto/set-task-done.dto';
 import type { UpdateTaskBody } from './dto/update-task.dto';
 import { toTask, type Task } from './tasks.mapper';
 import { TasksRepository, type TaskChanges } from './tasks.repository';
-
-/**
- * The zone a user's days are read in before the device has reported one. The
- * app reports it on every open, so this only covers the first requests of a
- * brand new account.
- */
-const FALLBACK_TIME_ZONE = 'UTC';
 
 @Injectable()
 export class TasksService {
@@ -319,32 +311,7 @@ export class TasksService {
    * whose account is gone is refused here.
    */
   private async todayFor(caller: Caller): Promise<string> {
-    const user = await this.users.findById(this.db, caller.userId);
-    if (user === null) throw accessTokenInvalid();
-    return todayIn(user.timeZone ?? FALLBACK_TIME_ZONE);
-  }
-}
-
-/**
- * A task goes in an occurrence that exists: one of the caller's series, on a
- * day it falls on. `date` is the day the occurrence starts, so a task in a
- * midnight-crossing block is dated the day the block began.
- */
-function assertOccursOn(
-  series: BlockSeriesRow | null,
-  date: string,
-): asserts series is BlockSeriesRow {
-  if (series === null) {
-    throw new NotFoundException({
-      code: 'NOT_FOUND' satisfies ErrorCode,
-      message: 'No such block.',
-    });
-  }
-  if (!occursOn(recurrenceOf(series), series.anchorDate, date)) {
-    throw new UnprocessableEntityException({
-      code: 'BLOCK_NOT_ON_DATE' satisfies ErrorCode,
-      message: 'The block does not fall on that date.',
-    });
+    return todayFor(await this.users.findById(this.db, caller.userId));
   }
 }
 
