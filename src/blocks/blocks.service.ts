@@ -5,8 +5,8 @@ import {
 } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
 import { resolveRecurrence } from '../calendar/recurrence';
-import { DB, type Db } from '../database/database.module';
-import type { ErrorCode } from '../http/error-code';
+import { DB, type Db } from '../core/database/database.module';
+import type { ErrorCode } from '../core/http/error-code';
 import { toBlockOccurrence, type BlockOccurrence } from './blocks.mapper';
 import { BlocksRepository } from './blocks.repository';
 import type { CreateBlockBody } from './dto/create-block.dto';

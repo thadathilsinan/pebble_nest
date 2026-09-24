@@ -1,4 +1,4 @@
-import { openTestDatabase, type TestDatabase } from '../database/testing';
+import { openTestDatabase, type TestDatabase } from '../core/database/testing';
 import { SessionsRepository } from '../auth/sessions.repository';
 import { UsersRepository } from './users.repository';
 

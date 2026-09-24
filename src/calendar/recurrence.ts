@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RECURRENCE_KINDS, type RecurrenceKind } from '../database/schema';
+import { RECURRENCE_KINDS, type RecurrenceKind } from '../core/database/schema';
 import { dayOfMonth, isoWeekday, localDate } from './local-date';
 
 /**

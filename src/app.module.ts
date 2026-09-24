@@ -2,15 +2,15 @@ import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { AuthModule } from './auth/auth.module';
 import { BlocksModule } from './blocks/blocks.module';
-import { AppConfigModule } from './config/config.module';
-import { DatabaseModule } from './database/database.module';
-import { HealthModule } from './health/health.module';
-import { AllExceptionsFilter } from './http/all-exceptions.filter';
-import { ResponseEnvelopeInterceptor } from './http/response.interceptor';
-import { RequestTimeoutInterceptor } from './http/timeout.interceptor';
-import { LoggingModule } from './logging/logging.module';
+import { AppConfigModule } from './core/config/config.module';
+import { DatabaseModule } from './core/database/database.module';
+import { HealthModule } from './core/health/health.module';
+import { AllExceptionsFilter } from './core/http/all-exceptions.filter';
+import { ResponseEnvelopeInterceptor } from './core/http/response.interceptor';
+import { RequestTimeoutInterceptor } from './core/http/timeout.interceptor';
+import { LoggingModule } from './core/logging/logging.module';
 import { MeModule } from './me/me.module';
-import { ZodValidationPipe } from './validation/validation.pipe';
+import { ZodValidationPipe } from './core/validation/validation.pipe';
 
 @Module({
   // `LoggingModule` registers the middleware that stamps the request id and

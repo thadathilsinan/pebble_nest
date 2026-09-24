@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { TIME_FORMATS, WEEK_STARTS } from '../../database/schema';
+import { TIME_FORMATS, WEEK_STARTS } from '../../core/database/schema';
 
 /**
  * Whether the runtime's time-zone database knows `zone`. A raw UTC offset such

@@ -3,7 +3,7 @@ import type {
   TimeFormat,
   UserRow,
   WeekStart,
-} from '../database/schema';
+} from '../core/database/schema';
 
 /** `Profile` in `docs/api-plan.md` §2. */
 export interface Profile {

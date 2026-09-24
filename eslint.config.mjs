@@ -36,15 +36,15 @@ export default tseslint.config(
           selector:
             "MemberExpression[object.name='process'][property.name='env']",
           message:
-            'Do not read process.env here. Inject the validated ENV token from src/config/ instead — values there are parsed, typed and defaulted.',
+            'Do not read process.env here. Inject the validated ENV token from src/core/config/ instead — values there are parsed, typed and defaulted.',
         },
       ],
     },
   },
   {
-    // src/config/ is the one place allowed to touch the raw environment: the
+    // src/core/config/ is the one place allowed to touch the raw environment: the
     // schema declares it and the module parses it. Everywhere else injects ENV.
-    files: ['src/config/**/*.ts'],
+    files: ['src/core/config/**/*.ts'],
     rules: {
       'no-restricted-syntax': 'off',
     },
@@ -56,12 +56,12 @@ export default tseslint.config(
     // applies to the same kind of rule, so it gets the same mechanism.
     //
     // Scoped to feature directories by excluding the infrastructure folders that
-    // legitimately import the database: `src/database/` defines the pool and the
-    // schema, and `src/health/` probes the pool directly, by decision.
+    // legitimately import the database: `src/core/database/` defines the pool and the
+    // schema, and `src/core/health/` probes the pool directly, by decision.
     files: ['src/**/*.ts'],
     ignores: [
-      'src/database/**/*.ts',
-      'src/health/**/*.ts',
+      'src/core/database/**/*.ts',
+      'src/core/health/**/*.ts',
       'src/**/*.repository.ts',
       'src/**/*.spec.ts',
     ],
@@ -78,7 +78,7 @@ export default tseslint.config(
             {
               name: 'pg',
               message:
-                'Inject the repository, not the pool. Raw pg access outside src/database/ bypasses the boundary that applies the two rules the database cannot enforce.',
+                'Inject the repository, not the pool. Raw pg access outside src/core/database/ bypasses the boundary that applies the two rules the database cannot enforce.',
             },
           ],
           patterns: [

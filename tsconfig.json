@@ -39,7 +39,7 @@
     // Without this, `row` is typed `NoteRow` and is `undefined` whenever the
     // statement matched nothing — so the lie is in the one line every data-access
     // method is built out of. With it, the empty case has to be handled where it
-    // arises. Cost when introduced: one expression, in `logging/pino-options.ts`.
+    // arises. Cost when introduced: one expression, in `core/logging/pino-options.ts`.
     "noUncheckedIndexedAccess": true
   }
 }

@@ -1,8 +1,8 @@
 import { HttpException } from '@nestjs/common';
 import type { PinoLogger } from 'nestjs-pino';
-import type { Env } from '../config/env.schema';
-import type { Db } from '../database/database.module';
-import type { SessionRow, UserRow } from '../database/schema';
+import type { Env } from '../core/config/env.schema';
+import type { Db } from '../core/database/database.module';
+import type { SessionRow, UserRow } from '../core/database/schema';
 import type { UsersRepository } from '../users/users.repository';
 import type { AccessTokensService } from './access-tokens.service';
 import { AuthService } from './auth.service';

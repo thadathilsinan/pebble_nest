@@ -25,7 +25,7 @@ const OPAQUE_MESSAGE = 'An unexpected error occurred.';
 
 /**
  * What a timeout says. Deliberately identical to the `TIMED_OUT` message in
- * `src/database/driver-error.ts`, because the two reach a caller as the same
+ * `src/core/database/driver-error.ts`, because the two reach a caller as the same
  * status for the same reason — one limit fired on a statement, the other on the
  * whole request — and a client should not have to tell them apart.
  */
@@ -208,7 +208,7 @@ function describe(exception: unknown): Outcome {
   // than incidental: a handler that catches a driver error and throws its own
   // `ConflictException` has *already* decided what the caller sees, and its
   // exception never reaches here as a driver error at all. This branch is the
-  // floor for everything nobody caught; `src/database/driver-error.ts` holds
+  // floor for everything nobody caught; `src/core/database/driver-error.ts` holds
   // the SQLSTATE table it consults.
   //
   // The driver's `message` is discarded here rather than sanitised. It names
@@ -292,7 +292,7 @@ function isTimeoutError(exception: unknown): boolean {
  *
  * Declared structurally rather than imported: `http-errors` is a transitive
  * dependency of express rather than one this service chose, which is the same
- * call `src/logging/pino-options.ts` makes about `pino-std-serializers`.
+ * call `src/core/logging/pino-options.ts` makes about `pino-std-serializers`.
  */
 interface HttpErrorLike {
   status: number;

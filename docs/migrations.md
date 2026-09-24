@@ -29,7 +29,7 @@ should expect to run them — they cover failure modes the tool does not report.
 
 ## Writing one
 
-**The routine case is code-first.** Edit `src/database/schema.ts`, then:
+**The routine case is code-first.** Edit `src/core/database/schema.ts`, then:
 
 ```
 npm run db:migrate:create

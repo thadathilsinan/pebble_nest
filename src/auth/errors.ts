@@ -1,5 +1,5 @@
 import { UnauthorizedException } from '@nestjs/common';
-import type { ErrorCode } from '../http/error-code';
+import type { ErrorCode } from '../core/http/error-code';
 
 /**
  * A missing, malformed, expired or forged access token, or one whose session

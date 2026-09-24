@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { JsonWebTokenError, JwtService } from '@nestjs/jwt';
-import { ENV } from '../config/config.module';
-import type { Env } from '../config/env.schema';
+import { ENV } from '../core/config/config.module';
+import type { Env } from '../core/config/env.schema';
 import type { Caller } from './caller';
 
 /** What an access token carries beyond `sub` (the user id). */

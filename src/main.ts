@@ -3,9 +3,9 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger } from 'nestjs-pino';
 import pino from 'pino';
 import { AppModule } from './app.module';
-import { configureApp } from './bootstrap/configure-app';
-import { ENV } from './config/config.module';
-import type { Env } from './config/env.schema';
+import { configureApp } from './core/bootstrap/configure-app';
+import { ENV } from './core/config/config.module';
+import type { Env } from './core/config/env.schema';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {

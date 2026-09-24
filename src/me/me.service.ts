@@ -3,9 +3,9 @@ import type { Caller } from '../auth/caller';
 import { accessTokenInvalid } from '../auth/errors';
 import { SessionsRepository } from '../auth/sessions.repository';
 import { SignInCodesRepository } from '../auth/sign-in-codes.repository';
-import { DB, type Db, type Executor } from '../database/database.module';
-import type { SessionRow } from '../database/schema';
-import type { ErrorCode } from '../http/error-code';
+import { DB, type Db, type Executor } from '../core/database/database.module';
+import type { SessionRow } from '../core/database/schema';
+import type { ErrorCode } from '../core/http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
 import {

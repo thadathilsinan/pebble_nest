@@ -1,5 +1,5 @@
 import type { Recurrence } from '../calendar/recurrence';
-import type { BlockSeriesRow } from '../database/schema';
+import type { BlockSeriesRow } from '../core/database/schema';
 
 /** `BlockOccurrence` in `docs/api-plan.md` §1: one series on one date. */
 export interface BlockOccurrence {

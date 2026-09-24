@@ -76,7 +76,7 @@ Riders: join tables take both nouns, both plural (`order_items`,
 These names are not cosmetic. When a constraint is violated the driver hands the
 application a structured error whose only machine-readable description of *which
 rule broke* is `error.constraint` — a string, the constraint's name.
-`src/database/driver-error.ts` maps that to an HTTP status and, where
+`src/core/database/driver-error.ts` maps that to an HTTP status and, where
 appropriate, to a field-level message, and it does so without letting the raw
 driver error reach the client, since the raw text carries the table layout and,
 in its `DETAIL` line, another row's data.
@@ -163,7 +163,7 @@ during a daylight-saving fall-back with no way to distinguish them.
 
 ### The session time zone is pinned to UTC by the application
 
-`src/database/database.module.ts` sets `options: '-c timezone=UTC'` on the pool.
+`src/core/database/database.module.ts` sets `options: '-c timezone=UTC'` on the pool.
 
 Reads through the driver are correct regardless, since `timestamptz` renders with
 an explicit offset that `node-postgres` parses into a correct `Date`. What the
@@ -505,7 +505,7 @@ be raced.
 
 ### The name is `idempotency_key`, and it is not the request id
 
-This codebase already has `X-Request-Id` (`src/http/request-id.ts`), and the two
+This codebase already has `X-Request-Id` (`src/core/http/request-id.ts`), and the two
 have opposite semantics:
 
 | | `X-Request-Id` | `idempotency_key` |

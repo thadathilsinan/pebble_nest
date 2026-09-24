@@ -3,13 +3,13 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { JwtService } from '@nestjs/jwt';
 import type { Pool } from 'pg';
 import request from 'supertest';
-import { AppModule } from './../src/app.module';
-import { MAILER, type Mailer } from './../src/auth/mailer/mailer';
-import { configureApp } from './../src/bootstrap/configure-app';
-import { ENV } from './../src/config/config.module';
-import type { Env } from './../src/config/env.schema';
-import { POOL } from './../src/database/database.module';
-import type { ApiError, ApiFailure } from './../src/http/envelope';
+import { AppModule } from '../src/app.module';
+import { MAILER, type Mailer } from '../src/auth/mailer/mailer';
+import { configureApp } from '../src/core/bootstrap/configure-app';
+import { ENV } from '../src/core/config/config.module';
+import type { Env } from '../src/core/config/env.schema';
+import { POOL } from '../src/core/database/database.module';
+import type { ApiError, ApiFailure } from '../src/core/http/envelope';
 
 /** `expect.any` is typed `any`; this names what it matches once. */
 const anyString: unknown = expect.any(String);

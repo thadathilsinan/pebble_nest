@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
-import type { Executor } from '../database/database.module';
-import { blockSeries, type BlockSeriesRow } from '../database/schema';
+import type { Executor } from '../core/database/database.module';
+import { blockSeries, type BlockSeriesRow } from '../core/database/schema';
 
 /** The columns `POST /blocks` writes. */
 export type NewBlockSeries = Pick<

@@ -49,7 +49,7 @@ error and being a partial write nobody sees.
 
 **3. Test isolation.** Settled by the first feature (email sign-in) as **decision 9
 in `docs/database-decisions.md`**: truncate the tables a spec touches before each
-test, and run jest `--runInBand`. `src/database/testing.ts` opens the app's own
+test, and run jest `--runInBand`. `src/core/database/testing.ts` opens the app's own
 pool for a repository spec. §9 has the rule.
 
 **4. Authorization.** Settled by the guard + `GET /me` slice: a global
@@ -63,6 +63,12 @@ the caller reaches services as an argument. §3.6 has the rules.
 One directory under `src/`, named for the resource in plural kebab-case — the same
 word as the URL segment and the table, so the three never have to be mapped onto
 each other.
+
+Cross-cutting infrastructure — `bootstrap`, `config`, `database`, `health`,
+`http`, `logging`, `validation` — lives under `src/core/` instead, so the top of
+`src/` lists only features and shared domain code (`users`, `calendar`). A new
+directory goes in `src/core/` only if it serves every feature rather than being
+one.
 
 ```
 src/notes/
@@ -89,7 +95,7 @@ under pressure, which is when the soft-delete filter gets left in two places.
 
 ### The table does not live here
 
-**Choice: every table stays in `src/database/schema.ts`.**
+**Choice: every table stays in `src/core/database/schema.ts`.**
 
 **Rejected: a `notes.schema.ts` inside the feature directory.**
 
@@ -104,9 +110,9 @@ global already — splitting the one file that describes them buys nothing and
 costs the ability to read the schema in one pass.
 
 **The growth path, so it is not improvised:** when one file becomes unpleasant,
-`src/database/schema.ts` becomes `src/database/schema/`, one file per table plus
+`src/core/database/schema.ts` becomes `src/core/database/schema/`, one file per table plus
 an `index.ts` that re-exports them, and `drizzle.config.ts`'s `schema` becomes
-`./src/database/schema/index.ts`. The snapshot is unaffected — it is keyed on
+`./src/core/database/schema/index.ts`. The snapshot is unaffected — it is keyed on
 table names, not file paths. Do that as a commit of its own, never inside a
 feature commit.
 
@@ -124,7 +130,7 @@ the list that **cannot be changed later** — `DEFAULT_VERSION` exists in
 ten minutes and a second opinion. §4.4 and §5.3 are the conventions it must
 satisfy.
 
-**2. Model the table** in `src/database/schema.ts`, against
+**2. Model the table** in `src/core/database/schema.ts`, against
 `docs/schema-conventions.md`. Decide explicitly — and record the reason in the
 migration — whether this table carries `version` (§10 there), `deleted_at` (§8)
 and `idempotency_key` (§9). Defaulting to all three is as wrong as defaulting to
@@ -184,7 +190,7 @@ envelope and `X-Request-Id`, which are what that spec is actually for.
 
 **Two of these are enforced by ESLint rather than by review.** `eslint.config.mjs`
 restricts `drizzle-orm` and `pg` imports outside `*.repository.ts` (plus
-`src/database/` and `src/health/`, which legitimately hold the pool), and restricts
+`src/core/database/` and `src/core/health/`, which legitimately hold the pool), and restricts
 Nest's HTTP exception classes *inside* `*.repository.ts`. That follows the
 precedent the same file already set for `process.env`: a boundary worth writing
 down is worth a rule, because the alternative is catching it in review every time
@@ -340,7 +346,7 @@ id from the body, the path or the query. A row that belongs to someone else is a
 
 ### 4.1 Every parameter is a DTO class. There are no exceptions.
 
-`src/validation/validation.pipe.ts` sets `strictSchemaDeclaration: true`, which
+`src/core/validation/validation.pipe.ts` sets `strictSchemaDeclaration: true`, which
 makes the pipe throw when a `@Body()`, `@Query()` or `@Param()` has no zod schema
 on its declared type. Verified against this repository:
 
@@ -470,7 +476,7 @@ example.
 `nextCursor` is `null` on the last page. The client passes it back as `?cursor=`.
 
 **Rejected: a top-level `meta` sibling to `data`.** It is the more conventional
-shape and it would mean editing `src/http/envelope.ts` and the interceptor — a
+shape and it would mean editing `src/core/http/envelope.ts` and the interceptor — a
 change to the contract of every endpoint in every cloned project, made on behalf
 of one. Putting the page metadata inside `data` needs no envelope change, keeps
 the discriminator (`error` present or not) intact, and costs one level of nesting.
@@ -549,7 +555,7 @@ pre-empting rather than relying on.
    'NOTE_TITLE_TAKEN' satisfies ErrorCode, message: '…' })`. This is the only one
    that produces a message written for the caller and a code specific enough to
    branch on. Prefer it.
-2. **The driver-error map** (`src/database/driver-error.ts`). A constraint
+2. **The driver-error map** (`src/core/database/driver-error.ts`). A constraint
    violation nobody caught becomes a 409 or a 422 with a generic code and a fixed
    message. It is deliberately the floor, not the mechanism —
    `docs/database-decisions.md` §10 explains why per-constraint codes are not kept
@@ -560,7 +566,7 @@ pre-empting rather than relying on.
 
 ### 6.2 Adding an error code
 
-`src/http/error-code.ts` is **append-only**: clients branch on these, so a code is
+`src/core/http/error-code.ts` is **append-only**: clients branch on these, so a code is
 never renamed and never repurposed. Add a code when a client would plausibly do
 something different about it — retry, re-read, show a specific field, send the
 user elsewhere. Do not add one per constraint out of symmetry; a code nothing
@@ -627,7 +633,7 @@ Zero rows back is `missing`; one row carries its own verdict.
 attached.** Telling this constraint from every other unique violation is possible
 only by its name, which `docs/schema-conventions.md` §9 notes is the second place
 the naming convention is load-bearing. The name is read with `uniqueViolation`
-from `src/database/driver-error.ts`, which exists for this caller:
+from `src/core/database/driver-error.ts`, which exists for this caller:
 
 ```ts
 const duplicate = uniqueViolation(error);
@@ -659,7 +665,7 @@ concurrency.
 
 ## 7. Transactions
 
-**All of this is wired already** — `src/database/database.module.ts` exports the
+**All of this is wired already** — `src/core/database/database.module.ts` exports the
 `DB` token and the `Schema`, `Db`, `Tx` and `Executor` types, and both `POOL` and
 `DB` are exported from the `@Global()` module. A feature imports them; it builds
 nothing.
@@ -778,7 +784,7 @@ why a derived path makes the assertion tautological.
 touches the database truncates the tables it uses in `beforeEach`
 (`TRUNCATE … RESTART IDENTITY CASCADE`), and jest runs with `--runInBand` so two
 files cannot interleave against one database. Open the database for a repository
-spec with `openTestDatabase()` from `src/database/testing.ts`. The suite empties
+spec with `openTestDatabase()` from `src/core/database/testing.ts`. The suite empties
 whatever `DATABASE_URL` names, so never point it at data you want.
 
 ---
@@ -795,7 +801,7 @@ opt in.
 ### 10.1 The table
 
 ```ts
-// src/database/schema.ts
+// src/core/database/schema.ts
 import { sql } from 'drizzle-orm';
 import { integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
@@ -1060,7 +1066,7 @@ export class NotesService {
 }
 ```
 
-`STALE_VERSION` is added to `src/http/error-code.ts` in the same commit (§6.2).
+`STALE_VERSION` is added to `src/core/http/error-code.ts` in the same commit (§6.2).
 
 ### 10.7 Controller and module
 

@@ -1,8 +1,8 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
-import { ENV } from '../config/config.module';
-import type { Env } from '../config/env.schema';
+import { ENV } from '../core/config/config.module';
+import type { Env } from '../core/config/env.schema';
 import { UsersModule } from '../users/users.module';
 import { AccessTokensService } from './access-tokens.service';
 import { AuthController } from './auth.controller';

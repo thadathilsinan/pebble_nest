@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
 import { Pool } from 'pg';
-import { Public } from '../auth/public.decorator';
+import { Public } from '../../auth/public.decorator';
 import { POOL } from '../database/database.module';
 import type { ErrorCode } from '../http/error-code';
 

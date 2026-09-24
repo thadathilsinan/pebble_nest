@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { and, eq, or, sql, type SQL } from 'drizzle-orm';
-import type { Executor } from '../database/database.module';
-import { users, type UserRow } from '../database/schema';
+import type { Executor } from '../core/database/database.module';
+import { users, type UserRow } from '../core/database/schema';
 
 /** The profile fields `PATCH /me` may write. */
 export type ProfilePatch = Partial<

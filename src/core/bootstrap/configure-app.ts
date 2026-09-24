@@ -52,7 +52,7 @@ const PREFLIGHT_MAX_AGE = 600;
  */
 export function configureApp(app: NestExpressApplication, env: Env): void {
   // Behind a load balancer every request arrives from the balancer, so without
-  // this the `remoteAddress` that `src/logging/pino-options.ts` already
+  // this the `remoteAddress` that `src/core/logging/pino-options.ts` already
   // serializes is the balancer's address on every line — one value, logged as
   // though it were the caller. `1` trusts a single hop, which is the shape of
   // one balancer in front of one service.

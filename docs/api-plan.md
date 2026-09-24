@@ -377,7 +377,7 @@ request turns out to be slow.
 
 ## 11. Error codes to add
 
-Append these to `src/http/error-code.ts`:
+Append these to `src/core/http/error-code.ts`:
 
 | Code | Status | When |
 |---|---|---|

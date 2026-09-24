@@ -1,7 +1,7 @@
 import { HttpException, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
-import type { Env } from '../config/env.schema';
+import type { Env } from '../core/config/env.schema';
 import { AccessTokensService } from './access-tokens.service';
 import { AuthGuard } from './auth.guard';
 import type { CallerRequest } from './caller';

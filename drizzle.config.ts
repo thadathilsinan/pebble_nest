@@ -50,9 +50,9 @@ export default defineConfig({
   // Currently a file with no tables in it, and it has to exist all the same:
   // `drizzle-kit` resolves this path before it does anything else and exits if
   // it finds nothing, including for commands that never read a schema.
-  // `src/database/schema.ts` carries that explanation at the point someone
+  // `src/core/database/schema.ts` carries that explanation at the point someone
   // would open it asking why it is empty.
-  schema: './src/database/schema.ts',
+  schema: './src/core/database/schema.ts',
 
   // Empty string rather than a hard failure when `DATABASE_URL` is unset,
   // because `db:migrate:create` does not connect and should keep working in a

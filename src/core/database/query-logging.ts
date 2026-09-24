@@ -163,7 +163,7 @@ function wrapClient(
  * of `info` and available locally by setting `LOG_LEVEL=debug`.
  *
  * That does make readiness chatty in development, since `/health/ready` polls
- * `SELECT 1` every few seconds. `src/logging/pino-options.ts` resolves the same
+ * `SELECT 1` every few seconds. `src/core/logging/pino-options.ts` resolves the same
  * tension the other way for the HTTP completion line, and the difference is
  * deliberate: a probe's own latency is the first visible symptom of a pool
  * running out of connections, so it is the one probe signal worth keeping.
@@ -188,7 +188,7 @@ function write(logger: Logger, slowQueryMs: number, line: QueryLine): void {
  * **Parameter values are never read, let alone logged** — only counted. They
  * are the request's data: an email address, a password reset token, whatever
  * the caller sent. This is the same rule the header allowlist in
- * `src/logging/pino-options.ts` applies, for the same reason.
+ * `src/core/logging/pino-options.ts` applies, for the same reason.
  *
  * The text itself is developer-written and safe to log, which holds only while
  * values arrive as parameters. A query built by concatenating a value into the

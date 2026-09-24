@@ -472,7 +472,7 @@ not own. And the lifetimes do not line up — its `run()` scope is the whole
 request, a transaction's is a slice of one. The intent of reusing that context
 rather than opening a second turned out to be achievable for **query logging**,
 where the need is exactly request-scoped, and not achievable for transactions.
-`src/database/query-logging.ts` is the half that was cashed.
+`src/core/database/query-logging.ts` is the half that was cashed.
 
 **Isolation, and the retry that is not here.** The default is READ COMMITTED and
 nothing opts into `SERIALIZABLE` yet, so **no bounded retry-on-`40001` wrapper
@@ -503,7 +503,7 @@ worker.**
 
 Decided by the first feature, email sign-in, as `docs/adding-a-feature.md` §0
 asked. The repository specs open the app's own pool and Drizzle instance
-through `src/database/testing.ts`, so a test runs the same session settings
+through `src/core/database/testing.ts`, so a test runs the same session settings
 production does; the e2e spec truncates through the app's `POOL`.
 
 Rollback-per-test lost on the thing the first repository most needed to test.
@@ -549,7 +549,7 @@ that will fail forever; and wrong for us, because `pino-options.ts` logs 5xx at
 `error` with a stack, so a duplicate signup becomes an error-level line and real
 incidents get buried under routine user mistakes.
 
-The full table is in `src/database/driver-error.ts`. Three choices in it needed
+The full table is in `src/core/database/driver-error.ts`. Three choices in it needed
 an argument.
 
 **Foreign keys map to 409 in both directions.** An insert naming a missing
@@ -575,7 +575,7 @@ like `EMAIL_ALREADY_REGISTERED`. A registry mapping every constraint name to a
 client-facing code would have to live in the HTTP layer and be kept in step with
 every migration, from the wrong side of the seam. Instead a handler that knows
 what it was doing catches the violation and throws its own code — the pattern
-`src/http/error-code.ts` already documents — and this table is the floor for
+`src/core/http/error-code.ts` already documents — and this table is the floor for
 everything nobody caught.
 
 **What it costs.** Two things. The mapping is **provenance-blind**: the filter

@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { eq, sql, type SQL } from 'drizzle-orm';
-import type { Executor, Tx } from '../database/database.module';
-import { emailSignInCodes, type EmailSignInCodeRow } from '../database/schema';
+import type { Executor, Tx } from '../core/database/database.module';
+import {
+  emailSignInCodes,
+  type EmailSignInCodeRow,
+} from '../core/database/schema';
 
 /** `n` seconds as an interval. The cast gives Postgres the parameter's type. */
 function seconds(n: number): SQL {

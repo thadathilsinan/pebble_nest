@@ -4,7 +4,7 @@ import type { ErrorCode } from '../http/error-code';
 /**
  * Translates a database driver failure into the terms the HTTP layer speaks.
  *
- * This lives in `src/database/` rather than next to the filter that calls it
+ * This lives in `src/core/database/` rather than next to the filter that calls it
  * because a table of SQLSTATE codes is knowledge about Postgres, not about
  * HTTP. It imports one *type* from the http folder and nothing at runtime, so
  * the dependency is erased at compile time and there is no cycle.
@@ -13,7 +13,7 @@ import type { ErrorCode } from '../http/error-code';
  * through `AllExceptionsFilter`'s last branch and renders as a 500. That is
  * wrong twice over. The caller is told the server broke when the server worked
  * exactly as designed, and is implicitly told to retry something that will fail
- * identically forever. And `src/logging/pino-options.ts` logs 5xx at `error`
+ * identically forever. And `src/core/logging/pino-options.ts` logs 5xx at `error`
  * with a stack trace, so a duplicate signup becomes an error-level line — which
  * is how real incidents end up buried under routine user mistakes.
  */
@@ -41,7 +41,7 @@ export interface DriverFailure extends Rejection {
  * **`detail` is deliberately absent.** Postgres puts the offending values in it
  * — `Key (email)=(a@b.com) already exists.` — so logging it would write user
  * data into every aggregator this service ships to, which is the same thing the
- * header allowlist in `src/logging/pino-options.ts` exists to stop. The
+ * header allowlist in `src/core/logging/pino-options.ts` exists to stop. The
  * constraint name says which rule broke, and that is the question a log is being
  * read to answer; the values are in the request the caller sent.
  */
@@ -128,7 +128,7 @@ const REJECTION_BY_SQLSTATE: Record<string, Rejection> = {
    * 409 is defensible for both, each being a conflict between the request and
    * the current state. This is the floor rather than the ceiling — a handler
    * that knows which direction it is in should catch the error and throw its
-   * own named code first, per the pattern in `src/http/error-code.ts`.
+   * own named code first, per the pattern in `src/core/http/error-code.ts`.
    */
   '23503': CONFLICT,
 
@@ -238,7 +238,7 @@ const POOL_FAILURE_MESSAGES = new Set([
  *
  * Declared structurally rather than checked with `instanceof DatabaseError`,
  * and the reason is the same one `isHttpError` in
- * `src/http/all-exceptions.filter.ts` gives for its own check. `DatabaseError`
+ * `src/core/http/all-exceptions.filter.ts` gives for its own check. `DatabaseError`
  * is defined in `pg-protocol`, a transitive dependency; `instanceof` compares
  * against one specific class object in memory, so two copies in `node_modules`
  * — which npm produces whenever versions conflict — means errors from one fail

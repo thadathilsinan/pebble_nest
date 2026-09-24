@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
-import type { Executor, Tx } from '../database/database.module';
+import type { Executor, Tx } from '../core/database/database.module';
 import {
   sessionRefreshTokens,
   sessions,
   type SessionRow,
   type SignInMethod,
-} from '../database/schema';
+} from '../core/database/schema';
 
 /** `n` days as an interval. The cast gives Postgres the parameter's type. */
 function days(n: number): SQL {

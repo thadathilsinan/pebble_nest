@@ -8,11 +8,11 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
-import { ENV } from '../config/config.module';
-import type { Env } from '../config/env.schema';
-import { DB, type Db } from '../database/database.module';
-import type { SessionRow, UserRow } from '../database/schema';
-import type { ErrorCode } from '../http/error-code';
+import { ENV } from '../core/config/config.module';
+import type { Env } from '../core/config/env.schema';
+import { DB, type Db } from '../core/database/database.module';
+import type { SessionRow, UserRow } from '../core/database/schema';
+import type { ErrorCode } from '../core/http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
 import { AccessTokensService } from './access-tokens.service';
