@@ -377,11 +377,13 @@ export type BlockSeriesRow = typeof blockSeries.$inferSelect;
  * the occurrence that starts on `date`. A date with no row is the series as
  * it stands.
  *
- * `skipped` (BLK-07/08) and `deleted` (BLK-10) so far. Editing one
- * occurrence adds its columns with its slice.
+ * `skipped` (BLK-07/08), `deleted` (BLK-10), and what editing only this
+ * occurrence overrode: `name`, `start_min`, `end_min` and `alert`, each null
+ * where the occurrence follows its series.
  *
  * No `version` or `idempotency_key`: skipping and deleting set absolute
- * values, so the last write wins and a retry is harmless.
+ * values, so the last write wins and a retry is harmless. An edit is checked
+ * against its series' `version`, which it bumps.
  */
 export const blockOccurrenceExceptions = pgTable(
   'block_occurrence_exceptions',
@@ -395,6 +397,13 @@ export const blockOccurrenceExceptions = pgTable(
     skipped: boolean('skipped').notNull().default(false),
     // The occurrence is gone for good; nothing un-deletes it.
     deleted: boolean('deleted').notNull().default(false),
+    // Overrides from editing only this occurrence; null follows the series.
+    // Its length (BLK-05) is checked by the service, since it can take one
+    // end from the series.
+    name: text('name'),
+    startMin: smallint('start_min'),
+    endMin: smallint('end_min'),
+    alert: boolean('alert'),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -403,6 +412,18 @@ export const blockOccurrenceExceptions = pgTable(
       .defaultNow(),
   },
   (table) => [
+    check(
+      'ck_block_occurrence_exceptions_name_length',
+      sql`${table.name} IS NULL OR (char_length(${table.name}) BETWEEN 1 AND 60 AND ${table.name} = btrim(${table.name}))`,
+    ),
+    check(
+      'ck_block_occurrence_exceptions_start_min',
+      sql`${table.startMin} IS NULL OR ${table.startMin} BETWEEN 0 AND 1439`,
+    ),
+    check(
+      'ck_block_occurrence_exceptions_end_min',
+      sql`${table.endMin} IS NULL OR ${table.endMin} BETWEEN 0 AND 1439`,
+    ),
     // Cascade: decision 18 — DELETE /me stays a single delete.
     foreignKey({
       name: 'fk_block_occurrence_exceptions_user_id',

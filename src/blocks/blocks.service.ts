@@ -1,19 +1,11 @@
-import {
-  Inject,
-  Injectable,
-  UnprocessableEntityException,
-} from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
-import {
-  chosenTraceFor,
-  normaliseBlockName,
-  tracesByName,
-} from '../block-names/block-name';
+import { normaliseBlockName, tracesByName } from '../block-names/block-name';
 import { BlockNamesRepository } from '../block-names/block-names.repository';
 import { firstOccurrenceFrom, resolveRecurrence } from '../calendar/recurrence';
 import { DB, type Db } from '../core/database/database.module';
 import type { BlockSeriesRow } from '../core/database/schema';
-import type { ErrorCode } from '../core/http/error-code';
+import { assertLongEnough, noOccurrence } from './block-occurrence';
 import {
   recurrenceOf,
   toBlockOccurrence,
@@ -21,9 +13,6 @@ import {
 } from './blocks.mapper';
 import { BlocksRepository } from './blocks.repository';
 import type { CreateBlockBody } from './dto/create-block.dto';
-
-/** BLK-05's lower bound. */
-const MIN_BLOCK_MINUTES = 5;
 
 @Injectable()
 export class BlocksService {
@@ -49,19 +38,11 @@ export class BlocksService {
     caller: Caller,
     body: CreateBlockBody,
   ): Promise<BlockOccurrence> {
-    if (lengthInMinutes(body.startMin, body.endMin) < MIN_BLOCK_MINUTES) {
-      throw new UnprocessableEntityException({
-        code: 'BLOCK_TOO_SHORT' satisfies ErrorCode,
-        message: `A block lasts at least ${MIN_BLOCK_MINUTES} minutes.`,
-      });
-    }
+    assertLongEnough(body);
 
     const recurrence = resolveRecurrence(body.recurrence, body.date);
     if (firstOccurrenceFrom(recurrence, body.date, body.date) === null) {
-      throw new UnprocessableEntityException({
-        code: 'BLOCK_NO_OCCURRENCE' satisfies ErrorCode,
-        message: 'The repeat ends before the block falls on any day.',
-      });
+      throw noOccurrence();
     }
 
     const { row } = await this.blocks.create(this.db, {
@@ -83,27 +64,15 @@ export class BlocksService {
     const traces = await this.names.findTraces(this.db, caller.userId, [
       normaliseBlockName(row.name),
     ]);
-    return toBlockOccurrence(
-      row,
-      firstOccurrenceOf(row),
-      chosenTraceFor(tracesByName(traces), row.name),
-    );
+    return toBlockOccurrence(row, firstOccurrenceOf(row), tracesByName(traces));
   }
 }
 
 /**
- * A block's length, counting a midnight crossing (BLK-04). `end = start` is a
- * full day rather than nothing.
+ * The series' first occurrence. Every stored series has one: `create` and
+ * occurrence edits refuse a recurrence that never lands before its `until`.
  */
-export function lengthInMinutes(startMin: number, endMin: number): number {
-  return endMin > startMin ? endMin - startMin : 1440 - startMin + endMin;
-}
-
-/**
- * The series' first occurrence. Every stored series has one: `create` refuses
- * a recurrence that never lands before its `until`.
- */
-function firstOccurrenceOf(row: BlockSeriesRow): string {
+export function firstOccurrenceOf(row: BlockSeriesRow): string {
   const date = firstOccurrenceFrom(
     recurrenceOf(row),
     row.anchorDate,

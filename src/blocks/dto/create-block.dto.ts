@@ -4,7 +4,10 @@ import { localDate } from '../../calendar/local-date';
 import { recurrenceInput } from '../../calendar/recurrence';
 
 /** Minutes from local midnight. */
-const minuteOfDay = z.number().int().min(0).max(1439);
+export const minuteOfDay = z.number().int().min(0).max(1439);
+
+/** Trimmed, 1–60 characters. */
+export const blockName = z.string().trim().min(1).max(60);
 
 /**
  * `POST /blocks`. The 5-minute minimum (BLK-05) is not checked here: it has
@@ -14,7 +17,7 @@ const minuteOfDay = z.number().int().min(0).max(1439);
 export class CreateBlockBody extends createZodDto(
   z
     .strictObject({
-      name: z.string().trim().min(1).max(60),
+      name: blockName,
       date: localDate,
       startMin: minuteOfDay,
       // `endMin <= startMin` crosses midnight (BLK-04).

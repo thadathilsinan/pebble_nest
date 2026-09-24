@@ -169,6 +169,26 @@ export class TasksRepository {
   }
 
   /**
+   * Every task, open and done, in any occurrence of `blockSeriesId`, locked
+   * as `findOpenInOccurrenceForUpdate` locks. Uses
+   * `idx_tasks_block_series_id`.
+   */
+  findAllInSeriesForUpdate(
+    ex: Executor,
+    userId: string,
+    blockSeriesId: string,
+  ): Promise<TaskRow[]> {
+    return ex
+      .select()
+      .from(tasks)
+      .where(
+        and(eq(tasks.userId, userId), eq(tasks.blockSeriesId, blockSeriesId)),
+      )
+      .orderBy(tasks.id)
+      .for('update');
+  }
+
+  /**
    * Marks the task done, stamping `doneAt` with the database's clock, or
    * open again. A reopened task on a closed day is `carry`-ed in the same
    * write: to `carry.date`'s general list, `carry.days` carries further on.

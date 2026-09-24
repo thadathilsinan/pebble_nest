@@ -37,7 +37,13 @@ type Task = {
 };
 type Occurrence = {
   seriesId: string;
+  seriesVersion: number;
   date: string;
+  name: string;
+  startMin: number;
+  endMin: number;
+  alert: boolean;
+  recurrence: { kind: string; weekdays: number[]; until: string | null };
   skipped: boolean;
   continuedFromPreviousDay: boolean;
   tasks: Task[];
@@ -49,7 +55,7 @@ type Failure = { error: { code: string } };
 const AHEAD = 'Pacific/Kiritimati';
 const BEHIND = 'Pacific/Pago_Pago';
 
-describe('Skipping and deleting a block occurrence (e2e)', () => {
+describe('Editing, skipping and deleting a block occurrence (e2e)', () => {
   let app: NestExpressApplication;
   let pool: Pool;
   let mailer: FakeMailer;
@@ -152,6 +158,32 @@ describe('Skipping and deleting a block occurrence (e2e)', () => {
       .delete(`/api/v1/blocks/${seriesId}/occurrences/${date}`)
       .query(scope === undefined ? {} : { scope })
       .set('Authorization', `Bearer ${token}`);
+  }
+
+  function patch(
+    seriesId: string,
+    date: string,
+    body: object,
+    token = accessToken,
+  ) {
+    return http()
+      .patch(`/api/v1/blocks/${seriesId}/occurrences/${date}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body);
+  }
+
+  function occurrenceOf(res: { body: unknown }): Occurrence {
+    return (res.body as { data: Occurrence }).data;
+  }
+
+  /** The series' occurrence starting on `date`, as `GET /days` lists it. */
+  async function listed(
+    seriesId: string,
+    date: string,
+  ): Promise<Occurrence | undefined> {
+    return (await getDay(date)).blocks.find(
+      (b) => b.seriesId === seriesId && !b.continuedFromPreviousDay,
+    );
   }
 
   /** The start dates of the series' occurrences listed from `from` to `to`. */
@@ -702,6 +734,486 @@ describe('Skipping and deleting a block occurrence (e2e)', () => {
       expect(codeOf(await remove(seriesId, future).expect(401))).toBe(
         'TOKEN_INVALID',
       );
+    });
+  });
+
+  describe('PATCH /blocks/{seriesId}/occurrences/{date}', () => {
+    it('edits a block that doesn’t repeat in place, bumping seriesVersion', async () => {
+      const seriesId = await postBlock({ date: future });
+      const task = await createTask({
+        title: 'A',
+        date: future,
+        blockSeriesId: seriesId,
+      });
+
+      const res = await patch(seriesId, future, {
+        version: 0,
+        name: '  Reading ',
+        startMin: 600,
+        endMin: 660,
+        alert: true,
+      }).expect(200);
+
+      expect(occurrenceOf(res)).toMatchObject({
+        seriesId,
+        seriesVersion: 1,
+        date: future,
+        name: 'Reading',
+        startMin: 600,
+        endMin: 660,
+        alert: true,
+        skipped: false,
+        tasks: [expect.objectContaining({ id: task.id })],
+        openCount: 1,
+        totalCount: 1,
+      });
+      expect(await listed(seriesId, future)).toEqual(occurrenceOf(res));
+    });
+
+    it('answers a patch that changes nothing with 200, leaving the version alone', async () => {
+      const seriesId = await postBlock({ date: future });
+
+      const res = await patch(seriesId, future, {
+        version: 0,
+        name: 'Deep work',
+        startMin: 540,
+        newDate: future,
+      }).expect(200);
+
+      expect(occurrenceOf(res)).toMatchObject({ seriesVersion: 0 });
+      expect(await seriesRow(seriesId)).toMatchObject({ version: 0 });
+    });
+
+    it('refuses a stale version with 409, carrying the occurrence as it is', async () => {
+      const seriesId = await postBlock({ date: future });
+      await patch(seriesId, future, { version: 0, name: 'First' }).expect(200);
+
+      const res = await patch(seriesId, future, {
+        version: 0,
+        name: 'Second',
+      }).expect(409);
+
+      expect(res.body).toMatchObject({
+        error: {
+          code: 'STALE_VERSION',
+          meta: {
+            current: {
+              seriesId,
+              seriesVersion: 1,
+              name: 'First',
+              date: future,
+            },
+          },
+        },
+      });
+    });
+
+    it('with onlyThis, overrides one occurrence of a repeating block', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const next = addDays(future, 1);
+
+      const res = await patch(seriesId, next, {
+        version: 0,
+        scope: 'onlyThis',
+        name: 'Gym',
+        endMin: 630,
+        alert: true,
+      }).expect(200);
+
+      expect(occurrenceOf(res)).toMatchObject({
+        seriesVersion: 1,
+        date: next,
+        name: 'Gym',
+        startMin: 540,
+        endMin: 630,
+        alert: true,
+        recurrence: { kind: 'daily' },
+      });
+      expect(await listed(seriesId, next)).toEqual(occurrenceOf(res));
+      for (const date of [future, addDays(future, 2)]) {
+        expect(await listed(seriesId, date)).toMatchObject({
+          seriesVersion: 1,
+          name: 'Deep work',
+          endMin: 600,
+          alert: false,
+        });
+      }
+    });
+
+    it('keeps an override following the series where it matches, and through skip and un-skip', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const next = addDays(future, 1);
+      await patch(seriesId, next, {
+        version: 0,
+        scope: 'onlyThis',
+        name: 'Deep work',
+        endMin: 630,
+      }).expect(200);
+      await skip(seriesId, next).expect(200);
+      await unskip(seriesId, next).expect(204);
+
+      // The name matched the series, so a series rename reaches it.
+      await patch(seriesId, future, {
+        version: 1,
+        scope: 'thisAndFuture',
+        name: 'Focus',
+      }).expect(200);
+
+      expect(await listed(seriesId, next)).toMatchObject({
+        name: 'Focus',
+        endMin: 630,
+        skipped: false,
+      });
+    });
+
+    it('gives an occurrence overridden across midnight its tail on the next day', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+
+      await patch(seriesId, future, {
+        version: 0,
+        scope: 'onlyThis',
+        startMin: 1380,
+        endMin: 60,
+      }).expect(200);
+
+      const next = await getDay(addDays(future, 1));
+      expect(
+        next.blocks.map((b) => [
+          b.date,
+          b.continuedFromPreviousDay,
+          b.startMin,
+        ]),
+      ).toEqual([
+        [future, true, 1380],
+        [addDays(future, 1), false, 540],
+      ]);
+    });
+
+    it('refuses a block shorter than 5 minutes, counting what the patch leaves alone', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+
+      for (const scope of ['onlyThis', 'thisAndFuture']) {
+        const res = await patch(seriesId, future, {
+          version: 0,
+          scope,
+          endMin: 543,
+        }).expect(422);
+        expect(codeOf(res)).toBe('BLOCK_TOO_SHORT');
+      }
+    });
+
+    it('with thisAndFuture on the first occurrence, changes the series and its rule', async () => {
+      // Two weeks of every day from a Monday.
+      let monday = future;
+      while (new Date(`${monday}T00:00:00Z`).getUTCDay() !== 1) {
+        monday = addDays(monday, 1);
+      }
+      const seriesId = await postBlock({
+        date: monday,
+        recurrence: { kind: 'daily' },
+      });
+      const tuesday = addDays(monday, 1);
+      const wednesday = addDays(monday, 2);
+      const kept = await createTask({
+        title: 'Kept',
+        date: wednesday,
+        blockSeriesId: seriesId,
+      });
+      const dropped = await createTask({
+        title: 'Dropped',
+        date: tuesday,
+        blockSeriesId: seriesId,
+      });
+
+      const res = await patch(seriesId, monday, {
+        version: 0,
+        scope: 'thisAndFuture',
+        recurrence: { kind: 'weekly', weekdays: [1, 3] },
+      }).expect(200);
+
+      expect(occurrenceOf(res)).toMatchObject({
+        date: monday,
+        seriesVersion: 1,
+        recurrence: { kind: 'weekly', weekdays: [1, 3], until: null },
+      });
+      expect(
+        await occurrenceDates(seriesId, monday, addDays(monday, 6)),
+      ).toEqual([monday, wednesday]);
+      expect((await listed(seriesId, wednesday))?.tasks).toEqual([
+        expect.objectContaining({ id: kept.id }),
+      ]);
+      // Its occurrence is gone, so it goes to its day's general list.
+      expect((await getDay(tuesday)).generalList).toEqual([
+        expect.objectContaining({
+          id: dropped.id,
+          blockSeriesId: null,
+          version: dropped.version + 1,
+        }),
+      ]);
+    });
+
+    it('makes a block that doesn’t repeat repeat, whatever the scope', async () => {
+      const seriesId = await postBlock({ date: future });
+
+      const res = await patch(seriesId, future, {
+        version: 0,
+        recurrence: { kind: 'daily', until: addDays(future, 1) },
+      }).expect(200);
+
+      expect(occurrenceOf(res).recurrence).toMatchObject({ kind: 'daily' });
+      expect(
+        await occurrenceDates(seriesId, future, addDays(future, 3)),
+      ).toEqual([future, addDays(future, 1)]);
+    });
+
+    it('answers with the first occurrence when the new rule skips the date', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const nextWeekday =
+        (new Date(`${future}T00:00:00Z`).getUTCDay() + 1) % 7 || 7;
+
+      const res = await patch(seriesId, future, {
+        version: 0,
+        scope: 'thisAndFuture',
+        recurrence: { kind: 'weekly', weekdays: [nextWeekday] },
+      }).expect(200);
+
+      expect(occurrenceOf(res).date).toBe(addDays(future, 1));
+    });
+
+    it('refuses a rule with no occurrence left, and an until before the date', async () => {
+      const seriesId = await postBlock({ date: future });
+      const nextWeekday =
+        (new Date(`${future}T00:00:00Z`).getUTCDay() + 1) % 7 || 7;
+
+      const none = await patch(seriesId, future, {
+        version: 0,
+        recurrence: { kind: 'weekly', weekdays: [nextWeekday], until: future },
+      }).expect(422);
+      const early = await patch(seriesId, future, {
+        version: 0,
+        recurrence: { kind: 'daily', until: addDays(future, -1) },
+      }).expect(400);
+
+      expect(codeOf(none)).toBe('BLOCK_NO_OCCURRENCE');
+      expect(codeOf(early)).toBe('VALIDATION_FAILED');
+    });
+
+    it('moves a block that doesn’t repeat to a new date, and its tasks with it', async () => {
+      const seriesId = await postBlock({ date: future });
+      const open = await createTask({
+        title: 'Open',
+        date: future,
+        blockSeriesId: seriesId,
+      });
+      const done = await createTask({
+        title: 'Done',
+        date: future,
+        blockSeriesId: seriesId,
+      });
+      await setDone(done.id);
+      const later = addDays(future, 2);
+
+      const res = await patch(seriesId, future, {
+        version: 0,
+        newDate: later,
+      }).expect(200);
+
+      expect(occurrenceOf(res)).toMatchObject({ date: later, totalCount: 2 });
+      expect(await listed(seriesId, future)).toBeUndefined();
+      expect((await listed(seriesId, later))?.tasks.map((t) => t.id)).toEqual([
+        open.id,
+        done.id,
+      ]);
+      expect(await ledger()).toEqual([{ day: later, outcome: 'completed' }]);
+    });
+
+    it('moving onto a closed day carries open tasks to today; done ones go along', async () => {
+      await setTimeZone(AHEAD);
+      const today = todayIn(AHEAD);
+      const past = addDays(today, -2);
+      const seriesId = await postBlock({ date: future });
+      const open = await createTask({
+        title: 'Open',
+        date: future,
+        blockSeriesId: seriesId,
+      });
+      const done = await createTask({
+        title: 'Done',
+        date: future,
+        blockSeriesId: seriesId,
+      });
+      await setDone(done.id);
+
+      await patch(seriesId, future, { version: 0, newDate: past }).expect(200);
+
+      expect((await listed(seriesId, past))?.tasks.map((t) => t.id)).toEqual([
+        done.id,
+      ]);
+      expect((await getDay(today)).generalList).toEqual([
+        expect.objectContaining({
+          id: open.id,
+          blockSeriesId: null,
+          carryCount: 2,
+        }),
+      ]);
+      expect(await ledger()).toEqual([
+        { day: past, outcome: 'completed' },
+        { day: past, outcome: 'incomplete' },
+        { day: addDays(past, 1), outcome: 'incomplete' },
+      ]);
+    });
+
+    it('moves the first occurrence of a repeating block, or refuses 422 when the rule misses the new date', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const weekday = new Date(`${future}T00:00:00Z`).getUTCDay() || 7;
+      const weekly = await postBlock({
+        date: future,
+        recurrence: { kind: 'weekly', weekdays: [weekday] },
+      });
+
+      await patch(seriesId, future, {
+        version: 0,
+        scope: 'thisAndFuture',
+        newDate: addDays(future, 1),
+      }).expect(200);
+      const res = await patch(weekly, future, {
+        version: 0,
+        scope: 'thisAndFuture',
+        newDate: addDays(future, 1),
+      }).expect(422);
+
+      expect(
+        await occurrenceDates(seriesId, future, addDays(future, 2)),
+      ).toEqual([addDays(future, 1), addDays(future, 2)]);
+      expect(codeOf(res)).toBe('BLOCK_NOT_ON_DATE');
+    });
+
+    it('refuses recurrence with onlyThis, and newDate with thisAndFuture past the first occurrence', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const next = addDays(future, 1);
+
+      for (const res of [
+        await patch(seriesId, next, {
+          version: 0,
+          scope: 'onlyThis',
+          recurrence: { kind: 'weekly' },
+        }),
+        await patch(seriesId, next, {
+          version: 0,
+          scope: 'thisAndFuture',
+          newDate: addDays(next, 1),
+        }),
+      ]) {
+        expect(res.status).toBe(400);
+        expect(codeOf(res)).toBe('VALIDATION_FAILED');
+      }
+    });
+
+    it('answers 501 for splitting a series or moving one occurrence, for now', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const next = addDays(future, 1);
+
+      for (const res of [
+        await patch(seriesId, next, {
+          version: 0,
+          scope: 'thisAndFuture',
+          name: 'Later',
+        }),
+        await patch(seriesId, next, {
+          version: 0,
+          scope: 'onlyThis',
+          newDate: addDays(next, 1),
+        }),
+      ]) {
+        expect(res.status).toBe(501);
+      }
+    });
+
+    it('answers 404 for an unknown series, someone else’s, or a deleted occurrence', async () => {
+      const other = await signIn('other@example.com');
+      const theirs = await postBlock({ date: future }, other);
+      const mine = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      await remove(mine, future).expect(200);
+
+      for (const seriesId of [
+        theirs,
+        mine,
+        '0192a000-0000-7000-8000-000000000001',
+      ]) {
+        const res = await patch(seriesId, future, { version: 0, name: 'X' });
+        expect(res.status).toBe(404);
+        expect(codeOf(res)).toBe('NOT_FOUND');
+      }
+    });
+
+    it('refuses a date the block does not fall on with 422', async () => {
+      const seriesId = await postBlock({ date: future });
+
+      const res = await patch(seriesId, addDays(future, 1), {
+        version: 0,
+        name: 'X',
+      }).expect(422);
+
+      expect(codeOf(res)).toBe('BLOCK_NOT_ON_DATE');
+    });
+
+    it('answers 400 for a bad id, date or body', async () => {
+      const seriesId = await postBlock({ date: future });
+
+      for (const res of [
+        await patch('not-a-uuid', future, { version: 0 }),
+        await patch(seriesId, '2026-02-30', { version: 0 }),
+        await patch(seriesId, future, { name: 'X' }),
+        await patch(seriesId, future, { version: 0, date: future }),
+        await patch(seriesId, future, { version: 0, scope: 'series' }),
+        await patch(seriesId, future, { version: 0, name: ' ' }),
+        await patch(seriesId, future, { version: 0, startMin: 1440 }),
+      ]) {
+        expect(res.status).toBe(400);
+        expect(codeOf(res)).toBe('VALIDATION_FAILED');
+      }
+    });
+
+    it('answers 401 without a token, and to a deleted account’s token', async () => {
+      const seriesId = await postBlock({ date: future });
+      expect(
+        codeOf(await patch(seriesId, future, { version: 0 }, 'nope')),
+      ).toBe('TOKEN_INVALID');
+      await http()
+        .delete('/api/v1/me')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .expect(204);
+
+      const res = await patch(seriesId, future, { version: 0 }).expect(401);
+
+      expect(codeOf(res)).toBe('TOKEN_INVALID');
     });
   });
 });

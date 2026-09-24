@@ -63,7 +63,7 @@ describe('BlockOccurrencesRepository (integration)', () => {
     expect(rows).toHaveLength(1);
   });
 
-  it('un-skips by removing the row, and un-skipping again is harmless', async () => {
+  it('un-skips, and un-skipping again is harmless', async () => {
     const userId = await newUser();
     const seriesId = await newSeries(userId);
     await repo.skip(t.db, userId, seriesId, '2026-09-25');
@@ -113,6 +113,75 @@ describe('BlockOccurrencesRepository (integration)', () => {
       { date: '2026-09-25', skipped: true, deleted: true },
       { date: '2026-09-26', skipped: false, deleted: true },
     ]);
+  });
+
+  it('overrides an occurrence, keeping its skip, and un-skip keeps the override', async () => {
+    const userId = await newUser();
+    const seriesId = await newSeries(userId);
+    await repo.skip(t.db, userId, seriesId, '2026-09-25');
+
+    await repo.override(t.db, userId, seriesId, '2026-09-25', {
+      name: 'Gym',
+      startMin: null,
+      endMin: 600,
+      alert: true,
+    });
+    const created = await repo.override(t.db, userId, seriesId, '2026-09-26', {
+      name: null,
+      startMin: 60,
+      endMin: null,
+      alert: null,
+    });
+    await repo.unskip(t.db, seriesId, '2026-09-25');
+
+    expect(created).toMatchObject({ date: '2026-09-26', startMin: 60 });
+    expect(await repo.find(t.db, seriesId, '2026-09-25')).toMatchObject({
+      skipped: false,
+      deleted: false,
+      name: 'Gym',
+      startMin: null,
+      endMin: 600,
+      alert: true,
+    });
+  });
+
+  it('replaces every override on a second write', async () => {
+    const userId = await newUser();
+    const seriesId = await newSeries(userId);
+    await repo.override(t.db, userId, seriesId, '2026-09-25', {
+      name: 'Gym',
+      startMin: 60,
+      endMin: 600,
+      alert: true,
+    });
+
+    const row = await repo.override(t.db, userId, seriesId, '2026-09-25', {
+      name: null,
+      startMin: 90,
+      endMin: null,
+      alert: null,
+    });
+
+    expect(row).toMatchObject({
+      name: null,
+      startMin: 90,
+      endMin: null,
+      alert: null,
+    });
+    expect(await repo.find(t.db, seriesId, '2026-09-24')).toBeNull();
+  });
+
+  it('moves an occurrence’s row to another date, unless that date has one', async () => {
+    const userId = await newUser();
+    const seriesId = await newSeries(userId);
+    await repo.skip(t.db, userId, seriesId, '2026-09-25');
+    await repo.skip(t.db, userId, seriesId, '2026-09-27');
+    await repo.markDeleted(t.db, userId, seriesId, '2026-09-28');
+
+    await repo.moveDate(t.db, seriesId, '2026-09-25', '2026-09-26');
+    await repo.moveDate(t.db, seriesId, '2026-09-26', '2026-09-28');
+
+    expect(await skippedDates(userId)).toEqual(['2026-09-26', '2026-09-27']);
   });
 
   it('goes with its series', async () => {

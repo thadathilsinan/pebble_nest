@@ -183,7 +183,7 @@ Screens: block slip, block sheet.
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | POST | `/blocks` | `{ name, date, startMin, endMin, recurrence?, alert, idempotencyKey? }` | `BlockOccurrence` (201). **Built.** See below. |
-| PATCH | `/blocks/{seriesId}/occurrences/{date}` | `{ version, scope, name?, startMin?, endMin?, newDate?, recurrence?, alert? }` | `BlockOccurrence` |
+| PATCH | `/blocks/{seriesId}/occurrences/{date}` | `{ version, scope?, name?, startMin?, endMin?, newDate?, recurrence?, alert? }` | `BlockOccurrence` (200). **Built, except splitting a series and moving one occurrence.** See below. |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}` | `?scope=onlyThis\|series` | `{ movedTaskCount }` (200). **Built.** See below. |
 | POST | `/blocks/{seriesId}/occurrences/{date}/skip` | — | `{ movedTaskCount }` (200). **Built.** See below. |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}/skip` | — | 204. **Built.** See below. |
@@ -212,6 +212,44 @@ Screens: block slip, block sheet.
 - **Edit scope** is `onlyThis` or `thisAndFuture`, and is ignored for a
   non-repeating block. `recurrence` is accepted only with `thisAndFuture`. Past
   occurrences never change.
+- **Edit (built in place and for `onlyThis`; the rest answers
+  `501 NOT_IMPLEMENTED` for now):** the body is strict, `version` is the
+  series' `seriesVersion` and required, and `scope` defaults to `onlyThis`.
+  `name`, `startMin`, `endMin` and `recurrence` follow create's rules; an
+  absent field is left alone, and `newDate` equal to `date` is no move.
+  Checked in this order: a bad id, date or body is
+  `400 VALIDATION_FAILED`; the occurrence is found as skip finds it (`404`,
+  `422 BLOCK_NOT_ON_DATE`); a stale `version` is `409 STALE_VERSION` with
+  the occurrence in `meta.current`; then what the scope accepts, since that
+  depends on whether the series repeats: `recurrence` with `onlyThis` on a
+  repeating block, and `newDate` with `thisAndFuture` on any but its first
+  occurrence, are `400 VALIDATION_FAILED`; then the values after the edit:
+  `422 BLOCK_TOO_SHORT`, and for a new rule create's checks. A patch that
+  changes nothing returns 200 and leaves `seriesVersion` alone; any real
+  change bumps it, even one to a single occurrence (decision 30). The series
+  row is locked for the write. A deleted account's token gets
+  `401 TOKEN_INVALID`, because an edit reads the user's time zone. It does
+  not read the session (decision 16).
+  - **In place:** a block that doesn't repeat, whatever the scope, or the
+    first occurrence of a repeating one with `thisAndFuture`, is the series
+    itself, so the series changes, every occurrence with it. A new
+    `recurrence` is anchored on the occurrence (an empty day list takes its
+    day), may make a one-off block repeat, and answers with its first
+    occurrence, as create does; an `until` before the date is
+    `400 VALIDATION_FAILED`. Tasks in occurrences the new rule no longer
+    has move to their own day's general list, as a deleted occurrence's do.
+    `newDate` moves the anchor, and the rule must land on it or it is
+    `422 BLOCK_NOT_ON_DATE`; the occurrence's tasks go with it (BLK-09),
+    a done one taking its `completed` entry along, an open one landing on a
+    closed day carrying on to today as `/move` carries it. Its skip and
+    overrides go too, unless the new date has its own.
+  - **`onlyThis`** on a repeating block overrides that occurrence alone:
+    its `name`, `startMin`, `endMin` and `alert`, held in its
+    `block_occurrence_exceptions` row. An override equal to the series is
+    stored as null, so it follows later changes to the series. `GET /days`
+    shows the overrides, on the midnight tail too, and whether there is a
+    tail follows the occurrence's own times. The trace is the one for the
+    occurrence's name. `GET /block-names` counts series names only.
 - **Moving a block:** its tasks go with it (BLK-09). Moving one occurrence of a
   repeating block to another date makes it a one-off block, and its tasks become
   one-offs.
@@ -265,8 +303,9 @@ Screens: block slip, block sheet.
   arrived since, normally 0. The open tasks are locked, so two devices
   skipping at once move each task once. A deleted account's token gets
   `401 TOKEN_INVALID`, because skip reads the user's time zone.
-- **Un-skip (built):** the same 400, 404 and 422 checks. It deletes the
-  occurrence's exception row, so un-skipping an occurrence that isn't skipped
+- **Un-skip (built):** the same 400, 404 and 422 checks. It clears the
+  exception row's `skipped`, keeping any override, so un-skipping an
+  occurrence that isn't skipped
   is also 204. It reads no user row, so a deleted account's token gets 404.
   Neither reads the session (decision 16).
 - **On the timeline**, a skipped occurrence has `skipped: true`, and so does
@@ -564,8 +603,9 @@ request turns out to be slow.
 | 25 | Renaming a task renames its ledger entries too, past days included, so the history shows the task's current title. This departs from the app, which keeps the title each entry was written with. `PATCH /tasks/{id}` reads no user row, so a deleted account's token gets 404 there. |
 | 26 | `POST /tasks/{id}/move` carries no `version` and is last-write-wins, like `/done`. A done task's `completed` entry moves with it. An open task moved onto a closed day carries forward at once (decision 2). A closed day that already recorded the task keeps its entry (`ON CONFLICT DO NOTHING`), and `carryCount` counts the carry again. `DELETE /tasks/{id}` ignores `scope` for a one-off, as the app does, and gets 404 on a retry. |
 | 27 | Block-name traces live in `block_name_traces`, keyed by the name trimmed and lower-cased in JavaScript, with no `version`. The server ports the app's default-trace hash (32-bit FNV-1a over UTF-16 code units, modulo the app's 9 traces; `src/block-names/block-name.ts`), so choosing the default deletes the row, as the app's `chooseTraceForName` does. A name whose default is `open` keeps any choice once made, as in the app. `PUT` is kept over the `PATCH` that adding-a-feature §4.4 prefers, since each request replaces the whole resource. JavaScript and Dart lower-case a few characters differently; that is accepted. `GET /block-names` counts every series, ended ones included. |
-| 28 | A per-occurrence change lives in `block_occurrence_exceptions`, one row per series and start date, keyed `(block_series_id, date)`, which holds only `skipped` until occurrence edit and delete add their columns. Un-skipping deletes the row. Skip and un-skip are their own module (`src/block-occurrences/`), since skipping moves tasks and `TasksModule` already imports `BlocksModule`. `POST …/skip` answers 200, since it is an action rather than a create. Skipping a closed day's occurrence carries its open tasks to today, as `/move` does (decision 26), rather than leaving them on the closed day as the app would. |
+| 28 | A per-occurrence change lives in `block_occurrence_exceptions`, one row per series and start date, keyed `(block_series_id, date)`, which holds `skipped`, `deleted` and an occurrence's overrides. Un-skipping clears `skipped` and keeps the row. Skip and un-skip are their own module (`src/block-occurrences/`), since skipping moves tasks and `TasksModule` already imports `BlocksModule`. `POST …/skip` answers 200, since it is an action rather than a create. Skipping a closed day's occurrence carries its open tasks to today, as `/move` does (decision 26), rather than leaving them on the closed day as the app would. |
 | 29 | Deleting a block occurrence marks it `deleted` in `block_occurrence_exceptions`, for good. `scope=series` deletes every occurrence from today on **and the occurrence named, even a past one**, so the block the user tapped always goes; this departs from the app, which ends the series the day before the named occurrence. A deleted occurrence's open tasks on a closed day carry forward to today, as skip's do (decision 28). A deleted occurrence is `404 NOT_FOUND` wherever it is named, while a date the rule never lands on stays `422 BLOCK_NOT_ON_DATE`. A series with nothing left before today is deleted rather than ended. |
+| 30 | `PATCH /blocks/{seriesId}/occurrences/{date}` checks the series' one `version`, and an `onlyThis` override bumps it, so another device's edit to a different occurrence of the same series gets a 409 and refetches; there is no version per occurrence. Editing the first occurrence with `thisAndFuture` edits the series in place, as the app does. Tasks in occurrences a new rule drops move to their own day's general list (BLK-10) rather than being orphaned as in the app. Moving the first occurrence to a date its rule doesn't land on is `422 BLOCK_NOT_ON_DATE`, not a re-derived rule. `newDate` with `thisAndFuture` past the first occurrence is `400`. A block moved onto a closed day carries its open tasks to today (decision 26). |
 
 ## 11. Error codes to add
 

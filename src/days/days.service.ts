@@ -1,18 +1,24 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
-import { chosenTraceFor, tracesByName } from '../block-names/block-name';
+import { tracesByName } from '../block-names/block-name';
 import { BlockOccurrencesRepository } from '../block-occurrences/block-occurrences.repository';
 import { BlockNamesRepository } from '../block-names/block-names.repository';
 import { addDays } from '../calendar/local-date';
 import { occursOn } from '../calendar/recurrence';
 import {
+  crossesMidnight,
   recurrenceOf,
+  shapeOf,
   toBlockOccurrence,
   type BlockOccurrence,
 } from '../blocks/blocks.mapper';
 import { BlocksRepository } from '../blocks/blocks.repository';
 import { DB, type Db } from '../core/database/database.module';
-import type { BlockSeriesRow, ChosenTrace } from '../core/database/schema';
+import type {
+  BlockOccurrenceExceptionRow,
+  BlockSeriesRow,
+  ChosenTrace,
+} from '../core/database/schema';
 import { compareTasks, toTask, type Task } from '../tasks/tasks.mapper';
 import { TasksRepository } from '../tasks/tasks.repository';
 
@@ -52,19 +58,15 @@ export class DaysService {
     ]);
     const tasks = groupTasks(taskRows.map(toTask));
     const traces = tracesByName(traceRows);
-    const skipped = new Set<string>();
-    const deleted = new Set<string>();
-    for (const row of exceptionRows) {
-      const key = slot(row.blockSeriesId, row.date);
-      if (row.skipped) skipped.add(key);
-      if (row.deleted) deleted.add(key);
-    }
+    const exceptions = new Map(
+      exceptionRows.map((row) => [slot(row.blockSeriesId, row.date), row]),
+    );
 
     const days: Day[] = [];
     for (let date = from; date <= to; date = addDays(date, 1)) {
       days.push({
         date,
-        blocks: blocksOn(rows, date, tasks, traces, { skipped, deleted }),
+        blocks: blocksOn(rows, date, tasks, traces, exceptions),
         generalList: tasks.get(slot(null, date)) ?? [],
       });
     }
@@ -93,54 +95,51 @@ function groupTasks(tasks: Task[]): Map<string, Task[]> {
   return out;
 }
 
-/** The `slot`s of occurrences that are skipped, and of those deleted. */
-interface Exceptions {
-  skipped: ReadonlySet<string>;
-  deleted: ReadonlySet<string>;
-}
-
 /**
  * The occurrences that start on `date`, plus the tails of those that started
  * the day before and cross midnight (BLK-04). A block ending exactly at
  * midnight has no tail: nothing of it falls on the next day. A tail is
- * skipped with its occurrence, and a deleted occurrence is left out along
- * with its tail.
+ * skipped and overridden with its occurrence, so whether there is one
+ * follows the occurrence's own times, and a deleted occurrence is left out
+ * along with its tail.
  */
 function blocksOn(
   rows: BlockSeriesRow[],
   date: string,
   tasks: Map<string, Task[]>,
   traces: ReadonlyMap<string, ChosenTrace>,
-  { skipped, deleted }: Exceptions,
+  exceptions: ReadonlyMap<string, BlockOccurrenceExceptionRow>,
 ): BlockOccurrence[] {
   const yesterday = addDays(date, -1);
   const out: BlockOccurrence[] = [];
 
   for (const row of rows) {
     const recurrence = recurrenceOf(row);
-    const trace = chosenTraceFor(traces, row.name);
     const tail = slot(row.id, yesterday);
+    const tailException = exceptions.get(tail) ?? null;
+    const tailShape = shapeOf(row, tailException);
     if (
-      crossesMidnight(row) &&
-      row.endMin > 0 &&
+      crossesMidnight(tailShape) &&
+      tailShape.endMin > 0 &&
       occursOn(recurrence, row.anchorDate, yesterday) &&
-      !deleted.has(tail)
+      !tailException?.deleted
     ) {
       // A tail holds the tasks of the occurrence it ends, as the app shows.
       out.push(
-        toBlockOccurrence(row, yesterday, trace, {
+        toBlockOccurrence(row, yesterday, traces, {
           continuedFromPreviousDay: true,
           tasks: tasks.get(tail) ?? [],
-          skipped: skipped.has(tail),
+          exception: tailException,
         }),
       );
     }
     const key = slot(row.id, date);
-    if (occursOn(recurrence, row.anchorDate, date) && !deleted.has(key)) {
+    const exception = exceptions.get(key) ?? null;
+    if (occursOn(recurrence, row.anchorDate, date) && !exception?.deleted) {
       out.push(
-        toBlockOccurrence(row, date, trace, {
+        toBlockOccurrence(row, date, traces, {
           tasks: tasks.get(key) ?? [],
-          skipped: skipped.has(key),
+          exception,
         }),
       );
     }
@@ -154,11 +153,6 @@ function blocksOn(
       compare(a.name, b.name) ||
       compare(a.seriesId, b.seriesId),
   );
-}
-
-/** `end_min <= start_min`, as the schema reads it; equal is a full day. */
-function crossesMidnight(row: BlockSeriesRow): boolean {
-  return row.endMin <= row.startMin;
 }
 
 function compare(a: string, b: string): number {

@@ -64,6 +64,13 @@
       "when": 1790247207132,
       "tag": "20260924105327_block_occurrence_deleted",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790247911376,
+      "tag": "20260924110511_block_occurrence_overrides",
+      "breakpoints": true
     }
   ]
 }

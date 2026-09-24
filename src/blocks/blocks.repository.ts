@@ -23,6 +23,11 @@ export type NewBlockSeries = Pick<
   | 'alert'
 > & { idempotencyKey?: string };
 
+/** What editing a series in place can change. */
+export type SeriesChanges = Partial<
+  Omit<NewBlockSeries, 'userId' | 'idempotencyKey'>
+>;
+
 @Injectable()
 export class BlocksRepository {
   /**
@@ -96,8 +101,8 @@ export class BlocksRepository {
   }
 
   /**
-   * One of the user's series, with whether its occurrence starting on `date`
-   * has been deleted, for `assertOccursOn` to judge. `lock` holds the series
+   * One of the user's series, with its occurrence's exception row on `date`,
+   * for `assertOccursOn` to judge whether it is deleted. `lock` holds the series
    * row until the transaction ends, so two writes to its occurrences take
    * turns; the exception is read after the lock is granted, so it is never
    * older than the lock.
@@ -118,7 +123,7 @@ export class BlocksRepository {
     if (series === undefined) return null;
 
     const [exception] = await ex
-      .select({ deleted: blockOccurrenceExceptions.deleted })
+      .select()
       .from(blockOccurrenceExceptions)
       .where(
         and(
@@ -127,7 +132,32 @@ export class BlocksRepository {
         ),
       )
       .limit(1);
-    return { series, deleted: exception?.deleted ?? false };
+    return {
+      series,
+      exception: exception ?? null,
+      deleted: exception?.deleted ?? false,
+    };
+  }
+
+  /**
+   * Writes `changes` to the series and bumps `version` once; with no
+   * changes, only bumps it. The caller holds the row's lock and has checked
+   * the version.
+   */
+  async update(
+    ex: Executor,
+    id: string,
+    changes: SeriesChanges = {},
+  ): Promise<BlockSeriesRow> {
+    const [row] = await ex
+      .update(blockSeries)
+      .set({ ...changes, version: sql`${blockSeries.version} + 1` })
+      .where(eq(blockSeries.id, id))
+      .returning();
+
+    if (row === undefined)
+      throw new Error('block series vanished while locked');
+    return row;
   }
 
   /**

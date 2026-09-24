@@ -1,8 +1,10 @@
 import {
+  Body,
   Controller,
   Delete,
   HttpCode,
   Param,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -11,10 +13,20 @@ import { CurrentCaller } from '../auth/current-caller.decorator';
 import { BlockOccurrencesService } from './block-occurrences.service';
 import { DeleteOccurrenceQuery } from './dto/delete-occurrence.dto';
 import { OccurrenceParams } from './dto/occurrence-params.dto';
+import { UpdateOccurrenceBody } from './dto/update-occurrence.dto';
 
 @Controller('blocks/:seriesId/occurrences/:date')
 export class BlockOccurrencesController {
   constructor(private readonly occurrences: BlockOccurrencesService) {}
+
+  @Patch()
+  edit(
+    @CurrentCaller() caller: Caller,
+    @Param() { seriesId, date }: OccurrenceParams,
+    @Body() body: UpdateOccurrenceBody,
+  ) {
+    return this.occurrences.edit(caller, seriesId, date, body);
+  }
 
   // An action on the occurrence, not a create, so 200 rather than POST's 201.
   @Post('skip')
