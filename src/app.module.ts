@@ -11,6 +11,7 @@ import { ResponseEnvelopeInterceptor } from './core/http/response.interceptor';
 import { RequestTimeoutInterceptor } from './core/http/timeout.interceptor';
 import { LoggingModule } from './core/logging/logging.module';
 import { MeModule } from './me/me.module';
+import { TasksModule } from './tasks/tasks.module';
 import { ZodValidationPipe } from './core/validation/validation.pipe';
 
 @Module({
@@ -31,6 +32,7 @@ import { ZodValidationPipe } from './core/validation/validation.pipe';
     MeModule,
     BlocksModule,
     DaysModule,
+    TasksModule,
   ],
   providers: [
     // Registered here rather than in `main.ts` so tests built with

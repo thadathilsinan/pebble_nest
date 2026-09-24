@@ -1,4 +1,4 @@
-import { addDays, daysBetween, daysInMonth } from './local-date';
+import { addDays, daysBetween, daysInMonth, todayIn } from './local-date';
 
 describe('local dates', () => {
   it('adds days across month and year ends', () => {
@@ -19,5 +19,13 @@ describe('local dates', () => {
     expect(daysInMonth('2028-02-10')).toBe(29);
     expect(daysInMonth('2026-04-30')).toBe(30);
     expect(daysInMonth('2026-12-01')).toBe(31);
+  });
+
+  it('reads today in a time zone', () => {
+    // 20:30 UTC is already the next day in Kolkata (+05:30).
+    const now = new Date('2026-09-24T20:30:00Z');
+    expect(todayIn('UTC', now)).toBe('2026-09-24');
+    expect(todayIn('Asia/Kolkata', now)).toBe('2026-09-25');
+    expect(todayIn('America/Los_Angeles', now)).toBe('2026-09-24');
   });
 });

@@ -1,5 +1,6 @@
 import type { Recurrence } from '../calendar/recurrence';
 import type { BlockSeriesRow } from '../core/database/schema';
+import type { Task } from '../tasks/tasks.mapper';
 
 /** `BlockOccurrence` in `docs/api-plan.md` §1: one series on one date. */
 export interface BlockOccurrence {
@@ -17,9 +18,8 @@ export interface BlockOccurrence {
   trace: string | null;
   /** The tail of yesterday's midnight-crossing block. */
   continuedFromPreviousDay: boolean;
-  // Tasks have no table yet. Until they do, every occurrence is truthfully
-  // empty, as `toProfile` does for the ledger.
-  tasks: never[];
+  /** In the order the app shows them (`compareTasks`). */
+  tasks: Task[];
   openCount: number;
   totalCount: number;
 }
@@ -35,8 +35,9 @@ export function recurrenceOf(row: BlockSeriesRow): Recurrence {
 }
 
 /**
- * The occurrence of `row` that starts on `date`. With no exceptions table yet,
- * every occurrence is the series itself: not skipped, not edited.
+ * The occurrence of `row` that starts on `date`, holding `tasks`, which the
+ * caller has already put in order. With no exceptions table yet, every
+ * occurrence is the series itself: not skipped, not edited.
  *
  * `continuedFromPreviousDay` marks the copy of yesterday's midnight-crossing
  * occurrence that a day's timeline shows as its tail (BLK-04). `date` is still
@@ -46,6 +47,7 @@ export function toBlockOccurrence(
   row: BlockSeriesRow,
   date: string,
   continuedFromPreviousDay = false,
+  tasks: Task[] = [],
 ): BlockOccurrence {
   return {
     seriesId: row.id,
@@ -61,8 +63,8 @@ export function toBlockOccurrence(
     // does not exist yet.
     trace: null,
     continuedFromPreviousDay,
-    tasks: [],
-    openCount: 0,
-    totalCount: 0,
+    tasks,
+    openCount: tasks.filter((task) => !task.done).length,
+    totalCount: tasks.length,
   };
 }

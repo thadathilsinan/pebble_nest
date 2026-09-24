@@ -154,8 +154,9 @@ Day = {
 
 The range form serves swipe prefetch and the Now screen (today + tomorrow).
 
-**Built, both forms.** Blocks only: `generalList` and each block's `tasks` are
-`[]` until tasks exist.
+**Built, both forms.** Each block carries its tasks, with `openCount` and
+`totalCount`, and `generalList` holds the day's tasks in no block. Both are in
+the order in §1. Tasks that repeat arrive with the task series slice.
 
 - **Which days a series lands on** follows the app's `Recurrence.occursOn`
   (`src/calendar/recurrence.ts`): never before the anchor or after `until`, and
@@ -168,9 +169,11 @@ The range form serves swipe prefetch and the Now screen (today + tomorrow).
   on the day after `until`.
 - **Order:** tails first, then by `startMin`, then name, then `seriesId`. Lanes
   are the client's job.
+- **A tail holds its occurrence's tasks:** the tasks dated D−1 in that block, as
+  the app shows them, so tasks are read from `from − 1`.
 - **Range:** `from` and `to` are both included, at most 14 days; `to < from` or a
-  longer span is `400 VALIDATION_FAILED`. One query reads the caller's series
-  and the days are expanded in memory.
+  longer span is `400 VALIDATION_FAILED`. One query reads the caller's series,
+  one reads their tasks, and the days are expanded in memory.
 - It does not read the session (decision 16).
 
 ## 4. Blocks (BLK, REC-04)
@@ -204,7 +207,7 @@ Screens: block slip, block sheet.
   created on a Wednesday answers with the next Monday (decision 20). A repeat
   whose `until` comes before its first occurrence is
   `422 BLOCK_NO_OCCURRENCE`. The occurrence carries
-  `tasks: []` and `trace: null` until those slices exist. It does not read the
+  `tasks: []`, and `trace: null` until that slice exists. It does not read the
   session (decision 16).
 - **Edit scope** is `onlyThis` or `thisAndFuture`, and is ignored for a
   non-repeating block. `recurrence` is accepted only with `thisAndFuture`. Past
@@ -242,7 +245,7 @@ Screen: task slip.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` |
+| POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built for one-offs.** See below. |
 | PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` |
 | PATCH | `/tasks/{id}/done` | `{ done }` | `Task` |
 | POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` |
@@ -286,6 +289,30 @@ is a day that has already closed, it is carried forward right away** (§7).
 
 **Creating** a task works for any date, past included. A task created on a day
 that has already closed is carried forward right away.
+
+**Create (built, one-offs only):**
+
+- `title` is trimmed, 1–200 characters (TSK-01). `notes` is at most 10,000
+  characters and defaults to `''`. `reminderAt` is `YYYY-MM-DDTHH:mm` with no
+  offset and needn't fall on `date`; it is stored as a date plus minutes, like a
+  block's start. Unknown fields are `400 VALIDATION_FAILED`.
+- `blockSeriesId` names an occurrence by its series and `date`, the day it
+  starts. An unknown series, or someone else's, is `404 NOT_FOUND`. A series
+  that doesn't fall on `date` is `422 BLOCK_NOT_ON_DATE`.
+- `repeatWithBlock: true` on a general-list task or with a block that doesn't
+  repeat, and a repeating `recurrence` on a task in a block, are
+  `422 REPEAT_NOT_ALLOWED`. A repeat that does fit is `501 NOT_IMPLEMENTED` until
+  task series exist. `repeatWithBlock: false` and `recurrence: {kind: "none"}`
+  are one-offs.
+- **Closed days** (decision 22): a `date` before today in the user's time zone,
+  or UTC if none has been reported, is closed. The task is created on today's
+  general list with `carryCount` equal to the days passed, and each closed day
+  from `date` to yesterday gets an `incomplete` ledger entry. The response
+  shows where the task ended up; a `date` different from the one sent means it
+  was carried. The ledger survives the task's deletion, keeping its title.
+- A retry with the same `idempotencyKey` returns the original with 201 and
+  writes no ledger entries of its own (decision 19). A deleted account's token
+  gets `401 TOKEN_INVALID`. It does not read the session (decision 16).
 
 ## 6. Notifications (NTF)
 
@@ -399,6 +426,8 @@ request turns out to be slow.
 | 19 | Idempotent creates use `INSERT … ON CONFLICT (user_id, idempotency_key) DO NOTHING` and then a select. A retry, even a concurrent one, gets the original with 201, and its body is not compared with the original's. The loser of a race waits for the winner's commit, so there is no in-progress case. A recurrence is stored with explicit days: the server fills in an empty `weekdays`/`monthDays` from the anchor date. |
 | 20 | A series' anchor (the `date` it was created with) is an occurrence only if the recurrence lands on it, as in the app. `POST /blocks` returns the first real occurrence, and refuses with `422 BLOCK_NO_OCCURRENCE` a series that would have none. |
 | 21 | `GET /days` expands recurrences in memory from one query per request, and the range form ships with the single-day form. A block's midnight tail is listed on the following day with its start `date`. |
+| 22 | Until the day-end job keeps a record of the last day it closed, a day is closed once it is before today in the user's time zone (UTC before the device reports one). Closed-day carry is computed on the write: the task lands on today's general list, and the ledger gets one `incomplete` row per day it passed through, written with `generate_series`, so even a date decades back is one statement. |
+| 23 | `POST /tasks` shipped with one-offs only. A repeat the rules allow answers `501 NOT_IMPLEMENTED`, not `REPEAT_NOT_ALLOWED`, so that code keeps one meaning: the repeat doesn't fit where the task sits. |
 
 ## 11. Error codes to add
 
@@ -413,7 +442,8 @@ Append these to `src/core/http/error-code.ts`:
 | `TOKEN_INVALID` | 401 | The access token or refresh token is bad, expired, revoked or reused. **Added** (refresh, auth guard). |
 | `BLOCK_TOO_SHORT` | 422 | BLK-05. **Added** (`POST /blocks`). `BLOCK_TOO_LONG` was dropped: minute-of-day start and end can't describe more than 24 hours. |
 | `BLOCK_NO_OCCURRENCE` | 422 | A repeating block whose `until` comes before the first day its rule lands on. **Added** (`POST /blocks`, decision 20). |
-| `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task, or `recurrence` on a task in a block. |
+| `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task or with a block that doesn't repeat, or `recurrence` on a task in a block. **Added** (`POST /tasks`). |
+| `BLOCK_NOT_ON_DATE` | 422 | A task put in a block on a date the block doesn't fall on. **Added** (`POST /tasks`). |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. **Not needed so far:** a create that inserts in one statement never exposes an unfinished original (decision 19). Add it only for a create that holds its insert open inside a longer transaction. |
 
 ## 12. Changes needed in the Flutter app

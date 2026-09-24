@@ -73,6 +73,24 @@ export class BlocksRepository {
   }
 
   /**
+   * One of the user's series. Someone else's id reads as absent, so an id
+   * never tells a caller whether another user's block exists.
+   */
+  async findById(
+    ex: Executor,
+    userId: string,
+    id: string,
+  ): Promise<BlockSeriesRow | null> {
+    const [row] = await ex
+      .select()
+      .from(blockSeries)
+      .where(and(eq(blockSeries.userId, userId), eq(blockSeries.id, id)))
+      .limit(1);
+
+    return row ?? null;
+  }
+
+  /**
    * The user's series that may have an occurrence starting between `from` and
    * `to`, both inclusive: begun by `to`, and not ended before `from`. Which
    * days in the range each one lands on is `occursOn`'s job, not SQL's.

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { BlocksModule } from '../blocks/blocks.module';
+import { TasksModule } from '../tasks/tasks.module';
 import { DaysController } from './days.controller';
 import { DaysService } from './days.service';
 
@@ -8,7 +9,7 @@ import { DaysService } from './days.service';
  * owns no table; it reads the other features' and lays them out by date.
  */
 @Module({
-  imports: [BlocksModule],
+  imports: [BlocksModule, TasksModule],
   controllers: [DaysController],
   providers: [DaysService],
 })

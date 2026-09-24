@@ -45,6 +45,19 @@ export function daysBetween(from: string, to: string): number {
 }
 
 /**
+ * The calendar date it is at `now` in the IANA `timeZone`, `YYYY-MM-DD`.
+ * `en-CA` is the locale whose short date is already in that order.
+ */
+export function todayIn(timeZone: string, now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+}
+
+/**
  * Midnight UTC on `date`, for calendar arithmetic only. UTC because it has no
  * daylight-saving gaps, not because the date means anything in UTC.
  */

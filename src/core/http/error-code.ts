@@ -48,7 +48,12 @@ export type ErrorCode =
   | 'BLOCK_TOO_SHORT'
   // A repeating block whose rule never lands on a day between its date and
   // its `until`, so it would never appear on any day.
-  | 'BLOCK_NO_OCCURRENCE';
+  | 'BLOCK_NO_OCCURRENCE'
+  // A task put in a block on a date the block does not fall on.
+  | 'BLOCK_NOT_ON_DATE'
+  // `repeatWithBlock` on a general-list task or with a block that does not
+  // repeat, or `recurrence` on a task in a block.
+  | 'REPEAT_NOT_ALLOWED';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted
