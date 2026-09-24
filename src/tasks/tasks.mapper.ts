@@ -1,5 +1,14 @@
 import { localDateTime } from '../calendar/local-date';
-import type { TaskRow } from '../core/database/schema';
+import type { Recurrence } from '../calendar/recurrence';
+import type { TaskRow, TaskSeriesRow } from '../core/database/schema';
+import { ownRecurrenceOf } from './task-series';
+
+/** `Task.repeat`: how the task's series repeats. */
+export interface TaskRepeat {
+  mode: 'withBlock' | 'own';
+  /** Set only when `mode` is `own`. */
+  recurrence: Recurrence | null;
+}
 
 /** `Task` in `docs/api-plan.md` §1. */
 export interface Task {
@@ -16,12 +25,21 @@ export interface Task {
   doneAt: string | null;
   carryCount: number;
   missed: boolean;
-  // Repeating tasks come with the task series slice. Until then every task is
-  // truthfully a one-off.
-  repeat: null;
+  /** Null is a one-off. */
+  repeat: TaskRepeat | null;
 }
 
-export function toTask(row: TaskRow): Task {
+/** A task, and the series it is an occurrence of, if any. */
+export interface TaskWithSeries {
+  task: TaskRow;
+  series: TaskSeriesRow | null;
+}
+
+/**
+ * `series` is the row `task.taskSeriesId` names. A task carried or missed
+ * is still an occurrence of its series; one split off by a move is not.
+ */
+export function toTask({ task: row, series }: TaskWithSeries): Task {
   return {
     id: row.id,
     version: row.version,
@@ -37,7 +55,12 @@ export function toTask(row: TaskRow): Task {
     doneAt: row.doneAt?.toISOString() ?? null,
     carryCount: row.carryCount,
     missed: row.missed,
-    repeat: null,
+    repeat:
+      series === null
+        ? null
+        : series.blockSeriesId === null
+          ? { mode: 'own', recurrence: ownRecurrenceOf(series) }
+          : { mode: 'withBlock', recurrence: null },
   };
 }
 

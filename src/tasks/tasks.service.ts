@@ -10,6 +10,7 @@ import type { Caller } from '../auth/caller';
 import { assertOccursOn } from '../blocks/block-occurrence';
 import { BlocksRepository } from '../blocks/blocks.repository';
 import { addDays, daysBetween } from '../calendar/local-date';
+import { resolveRecurrence, type Recurrence } from '../calendar/recurrence';
 import { DB, type Db, type Executor } from '../core/database/database.module';
 import type { TaskRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
@@ -19,7 +20,13 @@ import type { CreateTaskBody } from './dto/create-task.dto';
 import type { MoveTaskBody } from './dto/move-task.dto';
 import type { SetTaskDoneBody } from './dto/set-task-done.dto';
 import type { UpdateTaskBody } from './dto/update-task.dto';
-import { toTask, type Task } from './tasks.mapper';
+import { settle, type SeriesDays, type Settled } from './task-series';
+import {
+  TaskSeriesRepository,
+  type NewTaskSeries,
+} from './task-series.repository';
+import { TaskSeriesService } from './task-series.service';
+import { toTask, type Task, type TaskWithSeries } from './tasks.mapper';
 import { TasksRepository, type TaskChanges } from './tasks.repository';
 
 @Injectable()
@@ -29,28 +36,39 @@ export class TasksService {
     private readonly tasks: TasksRepository,
     private readonly blocks: BlocksRepository,
     private readonly users: UsersRepository,
+    private readonly taskSeries: TaskSeriesRepository,
+    private readonly series: TaskSeriesService,
   ) {}
 
   /**
-   * Creates a one-off task in a block occurrence or on a date's general list.
+   * Creates a task in a block occurrence or on a date's general list: a
+   * one-off, or the first occurrence of a repeating task (decision 1). One
+   * in a block may repeat with it, if the block repeats; one on the general
+   * list may repeat on its own `recurrence`. The series is anchored on
+   * `date` even when its rule doesn't land there, as in the app, and its
+   * later occurrences are issued as their dates are read.
    *
    * Any date is accepted (TSK-05), past included. A task put on a day that
-   * has already closed is carried forward at once, as the day-end job would
-   * have carried it (decision 2): it lands on today's general list with one
-   * carry and one `incomplete` ledger entry per closed day it passed through.
-   * The response shows where it ended up. Until the day-end job keeps its own
-   * record, "closed" means before today in the user's time zone.
+   * has already closed is settled at once, as the day-end job would have
+   * settled it (decision 2): carried to today's general list with one
+   * `incomplete` entry per closed day it passed through, or, if its series
+   * comes round again first, recorded missed on the day before that
+   * (REC-06). The response shows where it ended up. The series' other
+   * closed-day occurrences are issued open when read, like any other day's.
+   * Until the day-end job keeps its own record, "closed" means before today
+   * in the user's time zone.
    *
    * A retry carrying the same `idempotencyKey` returns the task the first
-   * request created, whatever the retry's body says, and writes no ledger
-   * entries of its own. It does not read the session (decision 16).
+   * request created, whatever the retry's body says, and writes no series or
+   * ledger entries of its own. It does not read the session (decision 16).
    */
   async create(caller: Caller, body: CreateTaskBody): Promise<Task> {
     const inBlock = body.blockSeriesId != null;
     const ownRepeat =
       body.recurrence !== undefined && body.recurrence.kind !== 'none';
+    const withBlock = body.repeatWithBlock === true;
 
-    if ((ownRepeat && inBlock) || (body.repeatWithBlock === true && !inBlock)) {
+    if ((ownRepeat && inBlock) || (withBlock && !inBlock)) {
       throw repeatNotAllowed();
     }
 
@@ -62,56 +80,87 @@ export class TasksService {
         body.date,
       );
       assertOccursOn(found, body.date);
-      if (
-        body.repeatWithBlock === true &&
-        found.series.recurrenceKind === 'none'
-      ) {
+      if (withBlock && found.series.recurrenceKind === 'none') {
         throw repeatNotAllowed();
       }
     }
 
-    // Repeating tasks arrive with the task series slice.
-    if (ownRepeat || body.repeatWithBlock === true) throw repeatsNotYet();
+    const series: NewTaskSeries | null =
+      ownRepeat || withBlock
+        ? {
+            userId: caller.userId,
+            blockSeriesId: withBlock ? body.blockSeriesId! : null,
+            anchorDate: body.date,
+            ...recurrenceColumns(
+              ownRepeat ? resolveRecurrence(body.recurrence, body.date) : null,
+            ),
+            title: body.title,
+            notes: body.notes ?? '',
+            reminderDayOffset: body.reminderAt
+              ? daysBetween(body.date, body.reminderAt.date)
+              : null,
+            reminderMin: body.reminderAt?.min ?? null,
+          }
+        : null;
 
     const today = await this.todayFor(caller);
-    const closed = body.date < today;
 
-    const row = await this.db.transaction(async (tx) => {
+    const created = await this.db.transaction(async (tx) => {
+      const settled =
+        body.date < today
+          ? await this.settleClosed(
+              tx,
+              caller.userId,
+              series && { ...series, endedOn: null },
+              body.date,
+              today,
+            )
+          : null;
+
       const { row, created } = await this.tasks.create(tx, {
         userId: caller.userId,
-        // A carried task arrives on the next day's general list, so one put
-        // on a closed day ends up on today's (TSK-06).
-        blockSeriesId: closed ? null : (body.blockSeriesId ?? null),
-        date: closed ? today : body.date,
+        blockSeriesId:
+          settled !== null && settled.carryDays > 0
+            ? // A carried task arrives on the next day's general list (TSK-06).
+              null
+            : (body.blockSeriesId ?? null),
+        date: settled?.date ?? body.date,
         title: body.title,
         notes: body.notes ?? '',
         reminderDate: body.reminderAt?.date ?? null,
         reminderMin: body.reminderAt?.min ?? null,
-        carryCount: closed ? daysBetween(body.date, today) : 0,
+        carryCount: settled?.carryDays ?? 0,
+        missed: settled?.missed ?? false,
         idempotencyKey: body.idempotencyKey,
       });
+      if (!created) return this.withSeries(tx, row);
 
-      if (created && closed) {
-        await this.tasks.recordIncomplete(
-          tx,
-          row,
-          body.date,
-          addDays(today, -1),
-        );
+      const task =
+        series === null
+          ? row
+          : await this.tasks.linkSeries(
+              tx,
+              row.id,
+              (await this.taskSeries.create(tx, series)).id,
+            );
+      if (settled !== null) {
+        await this.recordSettled(tx, task, body.date, settled, today);
       }
-      return row;
+      return this.withSeries(tx, task);
     });
 
-    return toTask(row);
+    return toTask(created);
   }
 
   /**
    * Marks a task done or open again (TSK-04). Done stamps `doneAt` and records
    * the task completed on its day; open again removes that record.
    *
-   * A task reopened on a day that has already closed is carried forward at
-   * once (decision 2), as `create` carries one put there: to today's general
-   * list, with one carry and one `incomplete` entry per closed day.
+   * A task reopened on a day that has already closed is settled at once
+   * (decision 2), as `create` settles one put there: carried to today's
+   * general list, or recorded missed on the day before its series comes
+   * round again (REC-06). A missed task reopened is missed again, where it
+   * is, since its day has been settled already.
    *
    * Sending the value the task already has changes nothing, not even
    * `version`. It does not read the session (decision 16).
@@ -124,30 +173,41 @@ export class TasksService {
     const today = await this.todayFor(caller);
 
     const row = await this.db.transaction(async (tx) => {
-      const task = await this.tasks.findForUpdate(tx, caller.userId, id);
-      if (task === null) throw taskNotFound();
-      if (task.done === body.done) return task;
+      const found = await this.tasks.findForUpdate(tx, caller.userId, id);
+      if (found === null) throw taskNotFound();
+      const task = await this.withSeries(tx, found);
+      if (found.done === body.done) return task;
 
       if (body.done) {
-        const done = await this.tasks.setDone(tx, task.id, true);
+        const done = await this.tasks.setDone(tx, found.id, true);
         await this.tasks.recordCompleted(tx, done);
-        return done;
+        return { ...task, task: done };
       }
 
-      await this.tasks.clearDay(tx, task.id, task.date);
-      if (task.date >= today) return this.tasks.setDone(tx, task.id, false);
+      await this.tasks.clearDay(tx, found.id, found.date);
+      if (found.missed) {
+        const reopened = await this.tasks.setDone(tx, found.id, false);
+        await this.tasks.recordMissed(tx, reopened);
+        return { ...task, task: reopened };
+      }
+      if (found.date >= today) {
+        return { ...task, task: await this.tasks.setDone(tx, found.id, false) };
+      }
 
-      const carried = await this.tasks.setDone(tx, task.id, false, {
-        date: today,
-        days: daysBetween(task.date, today),
-      });
-      await this.tasks.recordIncomplete(
+      const settled = await this.settleClosed(
         tx,
-        carried,
-        task.date,
-        addDays(today, -1),
+        caller.userId,
+        task.series,
+        found.date,
+        today,
       );
-      return carried;
+      const carried = await this.tasks.setDone(tx, found.id, false, {
+        date: settled.date,
+        days: settled.carryDays,
+        missed: settled.missed,
+      });
+      await this.recordSettled(tx, carried, found.date, settled, today);
+      return { ...task, task: carried };
     });
 
     return toTask(row);
@@ -178,7 +238,7 @@ export class TasksService {
         throw new ConflictException({
           code: 'STALE_VERSION' satisfies ErrorCode,
           message: 'The task was changed elsewhere. Re-apply and retry.',
-          meta: { current: toTask(task) },
+          meta: { current: toTask(await this.withSeries(tx, task)) },
         });
       }
 
@@ -194,7 +254,7 @@ export class TasksService {
       return updated;
     });
 
-    return toTask(row);
+    return toTask(await this.withSeries(this.db, row));
   }
 
   /**
@@ -264,7 +324,7 @@ export class TasksService {
       return carried;
     });
 
-    return toTask(row);
+    return toTask(await this.withSeries(this.db, row));
   }
 
   /**
@@ -316,6 +376,65 @@ export class TasksService {
   }
 
   /**
+   * Where an open task on closed day `date` ends up (`settle`): its series'
+   * next occurrence decides whether it carries to today or is missed first.
+   */
+  private async settleClosed(
+    ex: Executor,
+    userId: string,
+    series: SeriesDays | null,
+    date: string,
+    today: string,
+  ): Promise<Settled> {
+    const next =
+      series === null
+        ? null
+        : await this.series.nextAfter(ex, userId, series, date);
+    return settle(date, today, next);
+  }
+
+  /**
+   * The ledger for a task `settle`d from closed day `from`: `incomplete` on
+   * each day it carried out of, and `missed` on the day it stopped, if it
+   * was missed. `task` is the row as it now sits.
+   */
+  private async recordSettled(
+    ex: Executor,
+    task: TaskRow,
+    from: string,
+    settled: Settled,
+    today: string,
+  ): Promise<void> {
+    if (!settled.missed) {
+      await this.tasks.recordIncomplete(ex, task, from, addDays(today, -1));
+      return;
+    }
+    if (settled.carryDays > 0) {
+      await this.tasks.recordIncomplete(
+        ex,
+        task,
+        from,
+        addDays(settled.date, -1),
+      );
+    }
+    await this.tasks.recordMissed(ex, task);
+  }
+
+  /** The task with the series it is an occurrence of, for its `repeat`. */
+  private async withSeries(
+    ex: Executor,
+    task: TaskRow,
+  ): Promise<TaskWithSeries> {
+    return {
+      task,
+      series:
+        task.taskSeriesId === null
+          ? null
+          : await this.taskSeries.findById(ex, task.userId, task.taskSeriesId),
+    };
+  }
+
+  /**
    * Today in the caller's time zone: every day before it has closed. A token
    * whose account is gone is refused here.
    */
@@ -348,6 +467,18 @@ function changesTo(
     }
   }
   return Object.keys(changes).length === 0 ? undefined : changes;
+}
+
+/** A series' recurrence columns: its own rule, or none for one in a block. */
+function recurrenceColumns(
+  recurrence: Recurrence | null,
+): Pick<NewTaskSeries, 'recurrenceKind' | 'weekdays' | 'monthDays' | 'until'> {
+  return {
+    recurrenceKind: recurrence?.kind ?? 'none',
+    weekdays: recurrence?.weekdays ?? [],
+    monthDays: recurrence?.monthDays ?? [],
+    until: recurrence?.until ?? null,
+  };
 }
 
 function taskNotFound(): NotFoundException {

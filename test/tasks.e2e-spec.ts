@@ -320,30 +320,15 @@ describe('POST /tasks (e2e)', () => {
     }
   });
 
-  it('answers 501 for a repeat that fits, until repeating tasks exist', async () => {
-    const daily = await postBlock({
-      date: future,
-      recurrence: { kind: 'daily' },
-    });
-
-    await postTask({
-      title: 'A',
-      date: future,
-      recurrence: { kind: 'weekly' },
-    }).expect(501);
-    await postTask({
-      title: 'A',
-      date: future,
-      blockSeriesId: daily,
-      repeatWithBlock: true,
-    }).expect(501);
-    // Saying "no repeat" explicitly is a one-off.
-    await postTask({
+  it('treats saying "no repeat" explicitly as a one-off', async () => {
+    const task = await createTask({
       title: 'A',
       date: future,
       repeatWithBlock: false,
       recurrence: { kind: 'none' },
-    }).expect(201);
+    });
+
+    expect(task).toMatchObject({ repeat: null });
   });
 
   it('returns the original task for a repeated idempotency key', async () => {

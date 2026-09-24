@@ -196,7 +196,8 @@ The range form serves swipe prefetch and the Now screen (today + tomorrow).
 
 **Built, both forms.** Each block carries its tasks, with `openCount` and
 `totalCount`, and `generalList` holds the day's tasks in no block. Both are in
-the order in §1. Tasks that repeat arrive with the task series slice.
+the order in §1. Repeating tasks' occurrences in the range (and the day
+before it, for tails) are issued before the tasks are read (decision 35).
 
 - **Which days a series lands on** follows the app's `Recurrence.occursOn`
   (`src/calendar/recurrence.ts`): never before the anchor or after `until`, and
@@ -392,7 +393,7 @@ Screen: task slip.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built for one-offs.** See below. |
+| POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built.** See below. |
 | PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` (200). **Built for one-offs.** See below. |
 | PATCH | `/tasks/{id}/done` | `{ done }` | `Task` (200). **Built.** See below. |
 | POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` (200). **Built for one-offs.** See below. |
@@ -437,7 +438,7 @@ is a day that has already closed, it is carried forward right away** (§7).
 **Creating** a task works for any date, past included. A task created on a day
 that has already closed is carried forward right away.
 
-**Create (built, one-offs only):**
+**Create (built):**
 
 - `title` is trimmed, 1–200 characters (TSK-01). `notes` is at most 10,000
   characters and defaults to `''`. `reminderAt` is `YYYY-MM-DDTHH:mm` with no
@@ -448,13 +449,23 @@ that has already closed is carried forward right away.
   that doesn't fall on `date` is `422 BLOCK_NOT_ON_DATE`.
 - `repeatWithBlock: true` on a general-list task or with a block that doesn't
   repeat, and a repeating `recurrence` on a task in a block, are
-  `422 REPEAT_NOT_ALLOWED`. A repeat that does fit is `501 NOT_IMPLEMENTED` until
-  task series exist. `repeatWithBlock: false` and `recurrence: {kind: "none"}`
-  are one-offs.
+  `422 REPEAT_NOT_ALLOWED`. `repeatWithBlock: false` and
+  `recurrence: {kind: "none"}` are one-offs.
+- **A repeat that fits starts a task series** (decision 35), anchored on
+  `date`, which is its first occurrence even when its own rule doesn't land
+  there. `recurrence` is stored with explicit days, as a block's is
+  (decision 19), and an `until` before `date` is `400 VALIDATION_FAILED`.
+  The reminder repeats as the same time of day, the same number of days after
+  each occurrence's date.
 - **Closed days** (decision 22): a `date` before today in the user's time zone,
   or UTC if none has been reported, is closed. The task is created on today's
   general list with `carryCount` equal to the days passed, and each closed day
-  from `date` to yesterday gets an `incomplete` ledger entry. The response
+  from `date` to yesterday gets an `incomplete` ledger entry. A repeating task
+  stops carrying on the day before its series' next occurrence, if that is
+  before today: it stays there, `missed`, with a `missed` entry for that day
+  (REC-06). So a daily task put on a closed day is missed on its own day, in
+  its block. The series' other closed-day occurrences are not settled here;
+  they are issued open when read (decision 35). The response
   shows where the task ended up; a `date` different from the one sent means it
   was carried. The ledger survives the task's deletion, keeping its title.
 - A retry with the same `idempotencyKey` returns the original with 201 and
@@ -479,8 +490,10 @@ that has already closed is carried forward right away.
   one entry. An id that isn't a UUID is `400 VALIDATION_FAILED`; an unknown
   task, or someone else's, is `404 NOT_FOUND`. A deleted account's token gets
   `401 TOKEN_INVALID`. It does not read the session (decision 16).
-- Missed tasks only come from repeats, so whether one can be ticked is left to
-  the task series slice.
+- A missed task can be ticked: `completed` replaces its `missed` entry.
+  Reopened, it is missed again where it is, with its `missed` entry back,
+  since its day has already been settled. A repeating task reopened on a
+  closed day settles as a closed-day create does, by its series (REC-06).
 
 **Edit (built, one-offs only):**
 
@@ -705,6 +718,7 @@ request turns out to be slow.
 | 32 | `GET /review` has no range cap, since the UI's custom range reaches back to `firstRecordedDay`. It lays blocks out only from `firstRecordedDay` to today, which leaves the result unchanged, because an occurrence moved on its own becomes a one-off series anchored on its new date. Durations are whole minutes on the wire rather than float hours. `mostCarried` ranks only tasks carried at least once, as the app does. `Profile.firstRecordedDay` and `hasAnyRecord` are real from this slice on, on every `Profile` the API returns. |
 | 33 | `POST /auth/google` links by the verified email only: no identities table, and Google's `sub` isn't stored, so a Google account whose email changes opens a new Pebble account, as an email change would with email sign-in. Google's name fills `users.name` only while it is null. A token Google didn't issue for us, or one with an unverified email, is `401 ID_TOKEN_INVALID`, apart from `TOKEN_INVALID` because the client's next step is to try Google again, not to sign in again; Apple will use it too. `GOOGLE_CLIENT_IDS` is optional outside production, and the route is a 503 without it. Tokens are checked with `jsonwebtoken` against Google's JWKS, fetched with Node's `fetch` and cached for its `max-age`; `jose` 6 is ESM-only and Jest here runs CommonJS. A `kid` the cache lacks refetches at most once in 5 minutes, since the sender chooses the `kid`. |
 | 34 | `POST /auth/apple` links by the verified email only, as Google does (decision 33), and shares its verifier (`src/auth/id-tokens/`). The authorization code must be exchanged for a sign-in to succeed, so every Apple account has a refresh token to revoke. That token is stored as Apple sent it in `apple_grants`, not encrypted: revoking needs the token itself, and without our Apple private key it can only revoke the grant or mint Apple ID tokens for our app. `DELETE /me` revokes it after the delete commits, and the answer doesn't depend on the revoke: a failed revoke is logged, and the account stays deleted, so deletion never depends on Apple being up. iOS only: no Services ID, so no web or Android flow and no `redirect_uri`. No `nonce` check, as with Google. Apple's server-to-server notifications (a user revoking the app from their Apple ID settings) are not handled. The four `APPLE_` settings are all-or-none, the private key is checked to be a P-256 PEM at boot, and production refuses to start without them. |
+| 35 | Task series live in `task_series`, with each occurrence a row in `tasks` (`task_series_id`). Occurrences are **issued as their dates are read**: `GET /days` writes any occurrence in its range not yet issued, closed days included, before reading the tasks. `task_series_issued_dates` holds one row per series and date, and its key makes issuing idempotent and race-safe (one `INSERT … ON CONFLICT DO NOTHING` feeding the task insert), so an occurrence that is moved, split off or deleted never comes back. A closed day's issued occurrence stays open for the day-end job to settle. A repeating task created on a closed day is settled itself (carried, or missed by REC-06: on the day before its series' next occurrence), but its series' other closed-day occurrences are not issued and settled on the spot as the app does; they appear open when those days are read. A series in a block lands on the block's occurrences that aren't deleted, skipped ones included, as in the app. Reopening a missed task leaves it missed. |
 
 ## 11. Error codes to add
 

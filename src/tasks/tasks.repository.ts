@@ -15,9 +15,11 @@ import {
 import type { Executor } from '../core/database/database.module';
 import {
   taskLedgerEntries,
+  taskSeries,
   tasks,
   type TaskRow,
 } from '../core/database/schema';
+import type { TaskWithSeries } from './tasks.mapper';
 
 /** The columns `POST /tasks` writes. */
 export type NewTask = Pick<
@@ -30,7 +32,17 @@ export type NewTask = Pick<
   | 'reminderDate'
   | 'reminderMin'
   | 'carryCount'
-> & { idempotencyKey?: string };
+> & { missed?: boolean; idempotencyKey?: string };
+
+/**
+ * Where a reopened task on a closed day is carried in the same write: to
+ * `date`, `days` carries further on, and missed there or not.
+ */
+export interface Carry {
+  date: string;
+  days: number;
+  missed?: boolean;
+}
 
 /** The columns `PATCH /tasks/{id}` edits. */
 export type TaskChanges = Partial<
@@ -203,14 +215,15 @@ export class TasksRepository {
   /**
    * Marks the task done, stamping `doneAt` with the database's clock, or
    * open again. A reopened task on a closed day is `carry`-ed in the same
-   * write: to `carry.date`'s general list, `carry.days` carries further on.
-   * Bumps `version` once either way. The caller has checked `done` changes.
+   * write: to `carry.date`, `carry.days` carries further on, and out of its
+   * block if that takes it off its day. Bumps `version` once either way. The
+   * caller has checked `done` changes.
    */
   async setDone(
     ex: Executor,
     id: string,
     done: boolean,
-    carry?: { date: string; days: number },
+    carry?: Carry,
   ): Promise<TaskRow> {
     const [row] = await ex
       .update(tasks)
@@ -220,8 +233,9 @@ export class TasksRepository {
         version: sql`${tasks.version} + 1`,
         ...(carry && {
           date: carry.date,
-          blockSeriesId: null,
           carryCount: sql`${tasks.carryCount} + ${carry.days}`,
+          missed: carry.missed ?? false,
+          ...(carry.days > 0 && { blockSeriesId: null }),
         }),
       })
       .where(eq(tasks.id, id))
@@ -249,6 +263,45 @@ export class TasksRepository {
         target: [taskLedgerEntries.taskId, taskLedgerEntries.day],
         set: { outcome: 'completed', title: task.title },
       });
+  }
+
+  /**
+   * Records `task` missed on the day it sits on (REC-06), replacing whatever
+   * that day held for it.
+   */
+  async recordMissed(ex: Executor, task: TaskRow): Promise<void> {
+    await ex
+      .insert(taskLedgerEntries)
+      .values({
+        userId: task.userId,
+        taskId: task.id,
+        day: task.date,
+        outcome: 'missed',
+        title: task.title,
+      })
+      .onConflictDoUpdate({
+        target: [taskLedgerEntries.taskId, taskLedgerEntries.day],
+        set: { outcome: 'missed', title: task.title },
+      });
+  }
+
+  /**
+   * Makes a task just created the first occurrence of `taskSeriesId`. Not a
+   * user's edit, so `version` stays.
+   */
+  async linkSeries(
+    ex: Executor,
+    id: string,
+    taskSeriesId: string,
+  ): Promise<TaskRow> {
+    const [row] = await ex
+      .update(tasks)
+      .set({ taskSeriesId })
+      .where(eq(tasks.id, id))
+      .returning();
+
+    if (row === undefined) throw new Error('task vanished while linking');
+    return row;
   }
 
   /**
@@ -337,18 +390,19 @@ export class TasksRepository {
   }
 
   /**
-   * The user's tasks dated from `from` to `to`, both included, in no
-   * particular order. Uses `idx_tasks_user_id_date`.
+   * The user's tasks dated from `from` to `to`, both included, each with its
+   * series, in no particular order. Uses `idx_tasks_user_id_date`.
    */
   findBetween(
     ex: Executor,
     userId: string,
     from: string,
     to: string,
-  ): Promise<TaskRow[]> {
+  ): Promise<TaskWithSeries[]> {
     return ex
-      .select()
+      .select({ task: tasks, series: taskSeries })
       .from(tasks)
+      .leftJoin(taskSeries, eq(taskSeries.id, tasks.taskSeriesId))
       .where(
         and(
           eq(tasks.userId, userId),
@@ -404,7 +458,7 @@ export class TasksRepository {
     from: string,
     to: string,
     limit: number,
-  ): Promise<TaskRow[]> {
+  ): Promise<TaskWithSeries[]> {
     const carriedInPeriod = ex
       .select({ taskId: taskLedgerEntries.taskId })
       .from(taskLedgerEntries)
@@ -417,8 +471,9 @@ export class TasksRepository {
         ),
       );
     return ex
-      .select()
+      .select({ task: tasks, series: taskSeries })
       .from(tasks)
+      .leftJoin(taskSeries, eq(taskSeries.id, tasks.taskSeriesId))
       .where(
         and(
           eq(tasks.userId, userId),

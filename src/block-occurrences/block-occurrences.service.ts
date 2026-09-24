@@ -500,7 +500,7 @@ export class BlockOccurrencesService {
       ]),
     ]);
     const tasks = taskRows
-      .filter((task) => task.blockSeriesId === series.id)
+      .filter(({ task }) => task.blockSeriesId === series.id)
       .map(toTask)
       .sort(compareTasks);
     return toBlockOccurrence(series, date, tracesByName(traces), {

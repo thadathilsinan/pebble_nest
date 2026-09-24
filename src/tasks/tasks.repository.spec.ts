@@ -388,7 +388,7 @@ describe('TasksRepository (integration)', () => {
 
     const rows = await repo.findBetween(t.db, me, '2026-09-24', '2026-09-25');
 
-    expect(rows.map((r) => r.title).sort()).toEqual(['From', 'To']);
+    expect(rows.map((r) => r.task.title).sort()).toEqual(['From', 'To']);
   });
 
   describe('the review’s reads', () => {
@@ -487,7 +487,7 @@ describe('TasksRepository (integration)', () => {
         5,
       );
 
-      expect(rows.map((r) => r.title)).toEqual(['Left', 'Here']);
+      expect(rows.map((r) => r.task.title)).toEqual(['Left', 'Here']);
     });
 
     it('ranks ties by title, ignoring capitals, and keeps to the limit', async () => {
@@ -505,7 +505,7 @@ describe('TasksRepository (integration)', () => {
         3,
       );
 
-      expect(rows.map((r) => r.title)).toEqual(['Zulu', 'Alpha', 'bravo']);
+      expect(rows.map((r) => r.task.title)).toEqual(['Zulu', 'Alpha', 'bravo']);
     });
   });
 });

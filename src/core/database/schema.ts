@@ -29,6 +29,7 @@ import {
   index,
   integer,
   pgTable,
+  primaryKey,
   smallint,
   text,
   timestamp,
@@ -508,9 +509,157 @@ export const TASK_LEDGER_OUTCOMES = [
 export type TaskLedgerOutcome = (typeof TASK_LEDGER_OUTCOMES)[number];
 
 /**
+ * A repeating task (`Task series` in `docs/api-plan.md` §1): the template its
+ * occurrences are issued from, each of them a row in `tasks`. Two kinds
+ * (decision 1): with `block_series_id`, it repeats with that block and has no
+ * recurrence of its own; without, it is a general-list task repeating by its
+ * own `recurrence_*` columns, stored explicitly as a block's are.
+ *
+ * `anchor_date` is its first occurrence's date, which it has even when the
+ * rule doesn't land there, as in the app. `ended_on` is the last date it may
+ * appear on once it stops; `until` is the rule's own end.
+ *
+ * A reminder repeats as the same time of day, `reminder_day_offset` days after
+ * each occurrence's date (decision 6: local, no offset).
+ *
+ * No `version`: a series is edited through one of its tasks, whose `version`
+ * is checked, with the series row locked after the task's. No
+ * `idempotency_key`: it is created inside `POST /tasks`, which has one.
+ */
+export const taskSeries = pgTable(
+  'task_series',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    userId: uuid('user_id').notNull(),
+    // Null repeats on its own, by the recurrence below.
+    blockSeriesId: uuid('block_series_id'),
+    anchorDate: date('anchor_date', { mode: 'string' }).notNull(),
+    endedOn: date('ended_on', { mode: 'string' }),
+    recurrenceKind: text('recurrence_kind', { enum: RECURRENCE_KINDS })
+      .notNull()
+      .default('none'),
+    // 1 = Monday … 7 = Sunday.
+    weekdays: smallint('weekdays')
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    // 1..31, as `block_series.month_days`.
+    monthDays: smallint('month_days')
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    until: date('until', { mode: 'string' }),
+    // What each new occurrence is issued with. Notes are shared by every
+    // occurrence (decision 5), and are copied onto each as it is written.
+    title: text('title').notNull(),
+    notes: text('notes').notNull().default(''),
+    reminderDayOffset: integer('reminder_day_offset'),
+    reminderMin: smallint('reminder_min'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Cascade: decision 18 — DELETE /me stays a single delete.
+    foreignKey({
+      name: 'fk_task_series_user_id',
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+    // Cascade: a task repeating with its block means nothing once the block
+    // is gone. Its issued tasks stay, as one-offs (`tasks.task_series_id`).
+    foreignKey({
+      name: 'fk_task_series_block_series_id',
+      columns: [table.blockSeriesId],
+      foreignColumns: [blockSeries.id],
+    }).onDelete('cascade'),
+    // Reading a user's series; also the `user_id` foreign key's index.
+    index('idx_task_series_user_id').on(table.userId),
+    // schema-conventions §6: for the cascade, and for a block's series.
+    index('idx_task_series_block_series_id').on(table.blockSeriesId),
+    // Decision 1: in a block it follows the block; on its own it repeats.
+    check(
+      'ck_task_series_repeat_mode',
+      sql`(${table.blockSeriesId} IS NULL) = (${table.recurrenceKind} <> 'none')`,
+    ),
+    check(
+      'ck_task_series_recurrence_kind',
+      oneOf(sql`${table.recurrenceKind}`, RECURRENCE_KINDS),
+    ),
+    check(
+      'ck_task_series_weekdays',
+      sql`CASE WHEN ${table.recurrenceKind} = 'weekly'
+        THEN cardinality(${table.weekdays}) > 0 AND ${table.weekdays} <@ '{1,2,3,4,5,6,7}'::smallint[]
+        ELSE cardinality(${table.weekdays}) = 0 END`,
+    ),
+    check(
+      'ck_task_series_month_days',
+      sql`CASE WHEN ${table.recurrenceKind} = 'monthly'
+        THEN cardinality(${table.monthDays}) > 0 AND 1 <= ALL(${table.monthDays}) AND 31 >= ALL(${table.monthDays})
+        ELSE cardinality(${table.monthDays}) = 0 END`,
+    ),
+    check(
+      'ck_task_series_until',
+      sql`${table.until} IS NULL OR (${table.recurrenceKind} <> 'none' AND ${table.until} >= ${table.anchorDate})`,
+    ),
+    check(
+      'ck_task_series_ended_on',
+      sql`${table.endedOn} IS NULL OR ${table.endedOn} >= ${table.anchorDate}`,
+    ),
+    check(
+      'ck_task_series_title_length',
+      sql`char_length(${table.title}) BETWEEN 1 AND 200 AND ${table.title} = btrim(${table.title})`,
+    ),
+    check(
+      'ck_task_series_notes_length',
+      sql`char_length(${table.notes}) <= 10000`,
+    ),
+    check(
+      'ck_task_series_reminder',
+      sql`(${table.reminderDayOffset} IS NULL) = (${table.reminderMin} IS NULL)
+        AND (${table.reminderMin} IS NULL OR ${table.reminderMin} BETWEEN 0 AND 1439)`,
+    ),
+  ],
+);
+
+export type TaskSeriesRow = typeof taskSeries.$inferSelect;
+
+/**
+ * The dates a task series has issued its occurrence for, so each is issued
+ * once and never comes back, even after that task is moved off, split off
+ * or deleted (`TaskSeries.issued` in the app). Rows are only inserted: an
+ * insert that conflicts is a date already issued.
+ */
+export const taskSeriesIssuedDates = pgTable(
+  'task_series_issued_dates',
+  {
+    taskSeriesId: uuid('task_series_id').notNull(),
+    date: date('date', { mode: 'string' }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: 'pk_task_series_issued_dates',
+      columns: [table.taskSeriesId, table.date],
+    }),
+    // Cascade: the dates mean nothing without their series. The primary key
+    // leads with the column, so it is also this key's index.
+    foreignKey({
+      name: 'fk_task_series_issued_dates_task_series_id',
+      columns: [table.taskSeriesId],
+      foreignColumns: [taskSeries.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/**
  * One dated task (`Task` in `docs/api-plan.md` §1), in a block occurrence or on
- * its date's general list. Repeating tasks add a series table later; each of
- * their occurrences will still be one row here.
+ * its date's general list. An occurrence of a repeating task is one row here
+ * too, linked to its `task_series`.
  */
 export const tasks = pgTable(
   'tasks',
@@ -522,6 +671,9 @@ export const tasks = pgTable(
     // Null is the general list (TSK-02). Otherwise the task sits in the
     // occurrence of this series that starts on `date`.
     blockSeriesId: uuid('block_series_id'),
+    // The repeating task this is an occurrence of; null is a one-off,
+    // including an occurrence split off by a move.
+    taskSeriesId: uuid('task_series_id'),
     date: date('date', { mode: 'string' }).notNull(),
     title: text('title').notNull(),
     notes: text('notes').notNull().default(''),
@@ -563,6 +715,14 @@ export const tasks = pgTable(
       columns: [table.blockSeriesId],
       foreignColumns: [blockSeries.id],
     }).onDelete('set null'),
+    // Set null: an issued occurrence outlives its series as a one-off.
+    foreignKey({
+      name: 'fk_tasks_task_series_id',
+      columns: [table.taskSeriesId],
+      foreignColumns: [taskSeries.id],
+    }).onDelete('set null'),
+    // schema-conventions §6, and a series' occurrences are read by it.
+    index('idx_tasks_task_series_id').on(table.taskSeriesId),
     // Scoped to the owner (schema-conventions §9). It leads with `user_id`,
     // so it is also that foreign key's index (§6).
     uniqueIndex('uq_tasks_user_id_idempotency_key').on(

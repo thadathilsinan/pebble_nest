@@ -185,6 +185,28 @@ export class BlocksRepository {
   }
 
   /**
+   * The dates after `after` whose occurrence of the series has been deleted.
+   * Uses `uq_block_occurrence_exceptions_block_series_id_date`.
+   */
+  async findDeletedDatesAfter(
+    ex: Executor,
+    seriesId: string,
+    after: string,
+  ): Promise<Set<string>> {
+    const rows = await ex
+      .select({ date: blockOccurrenceExceptions.date })
+      .from(blockOccurrenceExceptions)
+      .where(
+        and(
+          eq(blockOccurrenceExceptions.blockSeriesId, seriesId),
+          gt(blockOccurrenceExceptions.date, after),
+          eq(blockOccurrenceExceptions.deleted, true),
+        ),
+      );
+    return new Set(rows.map((row) => row.date));
+  }
+
+  /**
    * The user's series that may have an occurrence starting between `from` and
    * `to`, both inclusive: begun by `to`, and not ended before `from`. Which
    * days in the range each one lands on is `occursOn`'s job, not SQL's.

@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { BlocksModule } from '../blocks/blocks.module';
 import { UsersModule } from '../users/users.module';
+import { TaskSeriesRepository } from './task-series.repository';
+import { TaskSeriesService } from './task-series.service';
 import { TasksController } from './tasks.controller';
 import { TasksRepository } from './tasks.repository';
 import { TasksService } from './tasks.service';
@@ -12,8 +14,14 @@ import { TasksService } from './tasks.service';
 @Module({
   imports: [BlocksModule, UsersModule],
   controllers: [TasksController],
-  providers: [TasksService, TasksRepository],
-  // `DaysModule` lays a day's tasks out beside its blocks.
-  exports: [TasksRepository],
+  providers: [
+    TasksService,
+    TasksRepository,
+    TaskSeriesRepository,
+    TaskSeriesService,
+  ],
+  // `DaysModule` lays a day's tasks out beside its blocks, issuing repeating
+  // tasks' occurrences first.
+  exports: [TasksRepository, TaskSeriesService],
 })
 export class TasksModule {}

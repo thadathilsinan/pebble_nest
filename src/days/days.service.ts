@@ -19,6 +19,8 @@ import type {
   BlockSeriesRow,
   ChosenTrace,
 } from '../core/database/schema';
+import type { BlockOccursOn } from '../tasks/task-series';
+import { TaskSeriesService } from '../tasks/task-series.service';
 import { compareTasks, toTask, type Task } from '../tasks/tasks.mapper';
 import { TasksRepository } from '../tasks/tasks.repository';
 
@@ -39,21 +41,37 @@ export class DaysService {
     private readonly tasks: TasksRepository,
     private readonly names: BlockNamesRepository,
     private readonly occurrences: BlockOccurrencesRepository,
+    private readonly taskSeries: TaskSeriesService,
   ) {}
 
   /**
    * Every day from `from` to `to`, both included, from one read each of the
    * caller's series, their tasks, their chosen traces and their occurrence
-   * exceptions. It does not read the session (decision 16).
+   * exceptions.
+   *
+   * Repeating tasks' occurrences in the range are issued first, if they
+   * haven't been, since the server creates them as their dates are read
+   * (api-plan §1). A closed day's are issued open, for the day-end job to
+   * settle. It does not read the session (decision 16).
    */
   async list(caller: Caller, from: string, to: string): Promise<Day[]> {
     // The day before `from`, for the tails of blocks that began then and the
     // tasks those tails hold.
     const since = addDays(from, -1);
-    const [taskRows, blocks] = await Promise.all([
-      this.tasks.findBetween(this.db, caller.userId, since, to),
-      this.readBlocks(caller, since, to),
-    ]);
+    const blocks = await this.readBlocks(caller, since, to);
+    await this.taskSeries.issueBetween(
+      this.db,
+      caller.userId,
+      since,
+      to,
+      blockOccursOn(blocks),
+    );
+    const taskRows = await this.tasks.findBetween(
+      this.db,
+      caller.userId,
+      since,
+      to,
+    );
     const tasks = groupTasks(taskRows.map(toTask));
 
     const days: Day[] = [];
@@ -115,6 +133,22 @@ interface BlockReads {
   rows: BlockSeriesRow[];
   traces: ReadonlyMap<string, ChosenTrace>;
   exceptions: ReadonlyMap<string, BlockOccurrenceExceptionRow>;
+}
+
+/**
+ * Whether one of the blocks read has a live occurrence starting on `date`:
+ * one its rule lands on, not deleted. Only good for the dates read.
+ */
+function blockOccursOn({ rows, exceptions }: BlockReads): BlockOccursOn {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  return (blockSeriesId, date) => {
+    const row = byId.get(blockSeriesId);
+    return (
+      row !== undefined &&
+      occursOn(recurrenceOf(row), row.anchorDate, date) &&
+      !exceptions.get(slot(blockSeriesId, date))?.deleted
+    );
+  };
 }
 
 /**

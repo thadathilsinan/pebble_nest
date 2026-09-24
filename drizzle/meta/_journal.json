@@ -85,6 +85,13 @@
       "when": 1790264099845,
       "tag": "20260924153459_apple_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790266496394,
+      "tag": "20260924161456_task_series",
+      "breakpoints": true
     }
   ]
 }
