@@ -1,3 +1,4 @@
+import { createPrivateKey } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -15,6 +16,19 @@ import { z } from 'zod';
 function isBareOrigin(value: string): boolean {
   try {
     return new URL(value).origin === value;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `pem` is a P-256 private key, the only kind Apple issues. */
+function isP256PrivateKey(pem: string): boolean {
+  try {
+    const key = createPrivateKey(pem);
+    return (
+      key.asymmetricKeyType === 'ec' &&
+      key.asymmetricKeyDetails?.namedCurve === 'prime256v1'
+    );
   } catch {
     return false;
   }
@@ -305,6 +319,38 @@ export const envSchema = z
           .map((id) => id.trim())
           .filter(Boolean),
       ),
+    /**
+     * Sign in with Apple (`POST /auth/apple`). All four or none: empty — the
+     * default — turns Apple sign-in off with a 503 until the developer account
+     * is set up (api-plan §13), and is refused in production below.
+     *
+     * The bundle IDs whose identity tokens are accepted, comma-separated. iOS
+     * only for now, so no Services ID (decision 34).
+     */
+    APPLE_CLIENT_IDS: z
+      .string()
+      .default('')
+      .transform((raw) =>
+        raw
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean),
+      ),
+    /** The developer account's Team ID: the `iss` of our client secrets. */
+    APPLE_TEAM_ID: z.string().trim().default(''),
+    /** The Key ID of the Sign in with Apple key below. */
+    APPLE_KEY_ID: z.string().trim().default(''),
+    /**
+     * The Sign in with Apple key's `.p8` file, whole. It may be written on
+     * one line with `\n` for each line break, as most secret stores need.
+     * Checked at boot to be a P-256 private key, so a pasting mistake fails
+     * the deploy rather than the first sign-in.
+     */
+    APPLE_PRIVATE_KEY: z
+      .string()
+      .default('')
+      .transform((raw) => raw.replace(/\\n/g, '\n').trim())
+      .transform((pem) => (pem === '' ? '' : `${pem}\n`)),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && env.MAILER === 'log') {
@@ -322,6 +368,44 @@ export const envSchema = z
         path: ['GOOGLE_CLIENT_IDS'],
         message:
           'Google sign-in accepts no token without its client IDs. Set them before running in production',
+      });
+    }
+
+    const apple = {
+      APPLE_CLIENT_IDS: env.APPLE_CLIENT_IDS.length > 0,
+      APPLE_TEAM_ID: env.APPLE_TEAM_ID !== '',
+      APPLE_KEY_ID: env.APPLE_KEY_ID !== '',
+      APPLE_PRIVATE_KEY: env.APPLE_PRIVATE_KEY !== '',
+    };
+    const appleSet = Object.values(apple).some(Boolean);
+
+    if (appleSet) {
+      for (const [name, set] of Object.entries(apple)) {
+        if (set) continue;
+        ctx.addIssue({
+          code: 'custom',
+          path: [name],
+          message:
+            'Sign in with Apple needs all four APPLE_ settings, or none of them',
+        });
+      }
+    }
+
+    if (apple.APPLE_PRIVATE_KEY && !isP256PrivateKey(env.APPLE_PRIVATE_KEY)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['APPLE_PRIVATE_KEY'],
+        message:
+          "Must be the Sign in with Apple key's .p8 file: a P-256 private key in PEM",
+      });
+    }
+
+    if (env.NODE_ENV === 'production' && !appleSet) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['APPLE_CLIENT_IDS'],
+        message:
+          'Sign in with Apple accepts no token without its settings. Set them before running in production',
       });
     }
   });

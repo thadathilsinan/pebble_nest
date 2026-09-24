@@ -265,6 +265,51 @@ export const sessionRefreshTokens = pgTable(
 export type SessionRefreshTokenRow = typeof sessionRefreshTokens.$inferSelect;
 
 /**
+ * The refresh token Apple handed over for an account's latest Sign in with
+ * Apple (`POST /auth/apple`). It is kept only so `DELETE /me` can revoke the
+ * account's Apple grant, which App Review requires; nothing signs in with it.
+ *
+ * One row per account, replaced on every Apple sign-in. `client_id` is the one
+ * the code was exchanged under, because the revoke has to name the same one.
+ *
+ * Stored as Apple sent it, not hashed: revoking needs the token itself.
+ * Without our Apple private key it can only revoke the grant or mint Apple ID
+ * tokens for our app (decision 34). No `version`: every write is a
+ * server-side upsert, never a client's read-modify-write.
+ */
+export const appleGrants = pgTable(
+  'apple_grants',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    userId: uuid('user_id').notNull(),
+    clientId: text('client_id').notNull(),
+    refreshToken: text('refresh_token').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Cascade: decision 18 — DELETE /me stays a single delete. It reads the
+    // row first, to revoke the grant once the delete has committed.
+    foreignKey({
+      name: 'fk_apple_grants_user_id',
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+    // One grant per account, and the foreign key's index
+    // (schema-conventions §6).
+    uniqueIndex('uq_apple_grants_user_id').on(table.userId),
+  ],
+);
+
+export type AppleGrantRow = typeof appleGrants.$inferSelect;
+
+/**
  * A block definition (`docs/api-plan.md` §1). A one-off block is a series of
  * one, with `recurrence_kind = 'none'`; its only occurrence is `anchor_date`.
  *

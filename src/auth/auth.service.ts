@@ -21,6 +21,10 @@ import type { ErrorCode } from '../core/http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
 import { AccessTokensService } from './access-tokens.service';
+import { AppleGrantsRepository } from './apple/apple-grants.repository';
+import { APPLE_ID_TOKENS } from './apple/apple-id-tokens';
+import { APPLE_TOKENS, type AppleTokens } from './apple/apple-tokens';
+import type { AppleSignInBody } from './dto/apple-sign-in.dto';
 import type { GoogleSignInBody } from './dto/google-sign-in.dto';
 import type { RefreshSessionBody } from './dto/refresh-session.dto';
 import type { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
@@ -28,6 +32,7 @@ import type { SignOutBody } from './dto/sign-out.dto';
 import type { VerifySignInCodeBody } from './dto/verify-sign-in-code.dto';
 import { GOOGLE_ID_TOKENS } from './google/google-id-tokens';
 import type { IdTokens } from './id-tokens/id-tokens';
+import { providerName } from './id-tokens/provider-name';
 import { MAILER, type Mailer } from './mailer/mailer';
 import { SessionsRepository } from './sessions.repository';
 import {
@@ -119,6 +124,9 @@ export class AuthService {
     private readonly accessTokens: AccessTokensService,
     @Inject(MAILER) private readonly mailer: Mailer,
     @Inject(GOOGLE_ID_TOKENS) private readonly googleIdTokens: IdTokens,
+    @Inject(APPLE_ID_TOKENS) private readonly appleIdTokens: IdTokens,
+    @Inject(APPLE_TOKENS) private readonly appleTokens: AppleTokens,
+    private readonly appleGrants: AppleGrantsRepository,
     @Inject(DB) private readonly db: Db,
     @Inject(ENV) private readonly env: Env,
     private readonly logger: PinoLogger,
@@ -266,6 +274,84 @@ export class AuthService {
   }
 
   /**
+   * Signs in with Sign in with Apple, opening the account if its email has
+   * none (ACC-03). The name the app passes on, which Apple gives it on the
+   * first sign-in only, fills an account that has no name yet.
+   *
+   * The authorization code is exchanged before anything is written, and a
+   * sign-in whose code Apple won't exchange fails: the refresh token it
+   * yields is what `DELETE /me` revokes, and an account without one could
+   * not be revoked (decision 34).
+   *
+   * Off, with a 503, until the Apple settings are configured (api-plan §13).
+   */
+  async signInWithApple({
+    identityToken,
+    authorizationCode,
+    fullName,
+  }: AppleSignInBody): Promise<SessionResponse> {
+    if (this.env.APPLE_CLIENT_IDS.length === 0) {
+      throw new ServiceUnavailableException({
+        code: 'SERVICE_UNAVAILABLE' satisfies ErrorCode,
+        message: 'Sign in with Apple is not set up on this server.',
+      });
+    }
+
+    const check = await this.appleIdTokens.verify(identityToken);
+
+    switch (check.outcome) {
+      case 'invalid':
+        throw this.appleSignInInvalid();
+      case 'unavailable':
+        this.logger.warn("Apple's signing keys could not be fetched");
+        throw this.appleUnavailable();
+    }
+
+    // Outside the transaction: a call to Apple holds no connection (§7).
+    const exchange = await this.appleTokens.exchange(
+      authorizationCode,
+      check.audience,
+    );
+
+    switch (exchange.outcome) {
+      case 'invalid':
+        throw this.appleSignInInvalid();
+      case 'unavailable':
+        this.logger.warn(
+          { reason: exchange.reason },
+          "Apple's authorization code could not be exchanged",
+        );
+        throw this.appleUnavailable();
+    }
+
+    const name = providerName(
+      [fullName?.givenName, fullName?.familyName]
+        .map((part) => part?.trim())
+        .filter(Boolean)
+        .join(' '),
+    );
+
+    const signedIn = await this.db.transaction(async (tx) => {
+      const opened = await this.openSession(
+        tx,
+        check.account.email,
+        'apple',
+        name,
+      );
+      await this.appleGrants.save(
+        tx,
+        opened.user.id,
+        check.audience,
+        exchange.refreshToken,
+      );
+
+      return opened;
+    });
+
+    return this.sessionResponse(signedIn, signedIn.created);
+  }
+
+  /**
    * Swaps a refresh token for a new one and a new access token, sliding the
    * session's expiry forward.
    *
@@ -379,6 +465,20 @@ export class AuthService {
     });
 
     return { user, created, session, refreshToken: refresh.token };
+  }
+
+  private appleSignInInvalid(): UnauthorizedException {
+    return new UnauthorizedException({
+      code: 'ID_TOKEN_INVALID' satisfies ErrorCode,
+      message: 'Apple could not confirm this sign-in. Try again.',
+    });
+  }
+
+  private appleUnavailable(): ServiceUnavailableException {
+    return new ServiceUnavailableException({
+      code: 'SERVICE_UNAVAILABLE' satisfies ErrorCode,
+      message: 'Sign in with Apple cannot be checked right now. Try again.',
+    });
   }
 
   private tokenInvalid(): UnauthorizedException {

@@ -96,12 +96,12 @@ Screens: sign-in, code entry, first run, You.
 | POST | `/auth/email/code` | `{ email }` | 204 | **Built.** Sends a 6-digit code that expires after 10 minutes. A new code replaces the old one and resets its attempts. Rate-limited per email: one send per 30 seconds and five per hour, otherwise `429 TOO_MANY_REQUESTS` with `meta.retryAfterSeconds`. Answers the same whether or not an account exists. Also used for "Send another code". |
 | POST | `/auth/email/verify` | `{ email, code }` | `Session` (200) | **Built.** Checked in this order: no code on file, or expired, or already used → `410 CODE_EXPIRED`; 5 wrong attempts already → `429 CODE_ATTEMPTS_EXHAUSTED`, even for the right code; wrong code → `400 CODE_INVALID` with `meta.attemptsLeft` (0 on the fifth miss). A code that isn't six digits is `400 VALIDATION_FAILED` and doesn't use up an attempt. |
 | POST | `/auth/google` | `{ idToken }` | `Session` (200) | **Built.** See below. |
-| POST | `/auth/apple` | `{ identityToken, authorizationCode, fullName? }` | `Session` | Apple sends the name only on first sign-in, so store it then. Keep the Apple refresh token. Account deletion must revoke it: add the revocation to `MeService.delete` in this slice. |
+| POST | `/auth/apple` | `{ identityToken, authorizationCode, fullName?: { givenName?, familyName? } }` | `Session` (200) | **Built.** See below. |
 | POST | `/auth/refresh` | `{ refreshToken }` | `Session` (200) | **Built.** Rotates the token and slides the session's expiry to 60 days from now. Presenting a token the session has already rotated away from revokes the whole device session, except for a **30-second grace window**: the token retired most recently rotates again, so a retry after a lost response doesn't sign the device out. Unknown, expired, revoked or reused tokens all get `401 TOKEN_INVALID`. `isNewAccount` is always `false`. |
 | POST | `/auth/sign-out` | `{ refreshToken }` | 204 | **Built.** ACC-05. Ends the session the token is current for. Idempotent: an unknown, expired or already-rotated token is also 204. |
 | GET | `/me` | — | `Profile` | **Built.** Reads the caller's session, because `signInMethod` belongs to the device. So a signed-out, revoked or expired session gets `401 TOKEN_INVALID` here right away, even though the guard still accepts its access token. |
 | PATCH | `/me` | `{ version?, name?, weekStart?, timeFormat?, timeZone? }` | `Profile` | **Built.** `version` is required unless `timeZone` is the only field sent. The client sends its zone silently on every app open, and that write is last-write-wins and never a 409 (decision 17). A stale `version` otherwise gets `409 STALE_VERSION` with the current profile in `meta.current`. A patch that changes nothing returns 200 and leaves `version` alone. `name` is trimmed and at most 80 characters; blank or `null` clears it. `timeZone` must be an IANA name the server's `Intl` knows, not a raw offset like `+05:30`, and is stored as sent. Reads the session, like `GET /me`. |
-| DELETE | `/me` | — | 204 | **Built.** ACC-06. An immediate hard delete in one transaction. Deleting the `users` row removes every device's session and retired tokens through the cascades, and the email's `email_sign_in_codes` row is deleted too, which resets its send rate limit. Needs a live session, like `GET /me`, so a signed-out device's still-valid access token gets `401 TOKEN_INVALID`. A retry after a lost response also gets 401, because the session went with the account (decision 18). There is no re-authentication: the client shows the confirmation. Sign in with Apple token revocation is added with `/auth/apple`. |
+| DELETE | `/me` | — | 204 | **Built.** ACC-06. An immediate hard delete in one transaction. Deleting the `users` row removes every device's session and retired tokens through the cascades, and the email's `email_sign_in_codes` row is deleted too, which resets its send rate limit. Needs a live session, like `GET /me`, so a signed-out device's still-valid access token gets `401 TOKEN_INVALID`. A retry after a lost response also gets 401, because the session went with the account (decision 18). There is no re-authentication: the client shows the confirmation. An account that signed in with Apple has its Apple grant revoked after the delete commits, best-effort: a failure is logged and the answer is still 204 (decision 34). |
 
 ```jsonc
 Session = { "accessToken", "accessTokenExpiresAt", "refreshToken", "isNewAccount": bool, "profile": Profile }
@@ -140,6 +140,24 @@ Profile = {
   user chose is never replaced. The session's `signInMethod` is `google`.
   There is no rate limit: every guess costs an attacker a token Google signed
   (decision 33).
+- **Sign in with Apple (built):** iOS only for now. `identityToken` is checked
+  like Google's ID token: the same shape rule, an RS256 signature by a key in
+  Apple's published set, `iss` of `https://appleid.apple.com`, an `aud` that
+  is one of `APPLE_CLIENT_IDS` (our bundle IDs), an unexpired `exp`, and
+  `email_verified` (Apple sends it as a string or a boolean). A private-relay
+  address is accepted as the account's email. Then `authorizationCode` is
+  exchanged at Apple's token endpoint under the token's own `aud`, with a
+  client secret signed by our Sign in with Apple key, before anything is
+  written. A code Apple refuses (`invalid_grant`: used, expired, or not ours)
+  is `401 ID_TOKEN_INVALID`, and a sign-in whose code can't be exchanged fails
+  with 503, because the refresh token it yields is what account deletion
+  revokes. That token is kept in `apple_grants`, one per account, replaced on
+  each Apple sign-in. `fullName`'s parts are trimmed and joined with a space,
+  and name the account only while it has none, as Google's name does; Apple
+  sends the name on the first sign-in only, so the app passes it on whenever
+  it has it. `code` is 1 to 1024 characters and each name part at most 200.
+  With the Apple settings unset the route answers `503 SERVICE_UNAVAILABLE`
+  before checking anything (decision 34).
 - **Auth model:** a short-lived access JWT (about 15 minutes) sent as `Bearer`,
   plus a long-lived, rotating, opaque refresh token for each device.
 - **Every route outside `/auth/*` and `/health/*` needs the access token.** A
@@ -686,6 +704,7 @@ request turns out to be slow.
 | 31 | `GET /notifications/schedule` builds block alerts from `DaysService.list`, so an alert follows everything the Day screen shows, and reads task reminders by the reminder's own date through a partial index on open tasks. It returns the whole window, times already past included, and leaves dropping those to the phone, so the server needs no notion of "now" here. A midnight tail has no alert. Missed tasks are left out. |
 | 32 | `GET /review` has no range cap, since the UI's custom range reaches back to `firstRecordedDay`. It lays blocks out only from `firstRecordedDay` to today, which leaves the result unchanged, because an occurrence moved on its own becomes a one-off series anchored on its new date. Durations are whole minutes on the wire rather than float hours. `mostCarried` ranks only tasks carried at least once, as the app does. `Profile.firstRecordedDay` and `hasAnyRecord` are real from this slice on, on every `Profile` the API returns. |
 | 33 | `POST /auth/google` links by the verified email only: no identities table, and Google's `sub` isn't stored, so a Google account whose email changes opens a new Pebble account, as an email change would with email sign-in. Google's name fills `users.name` only while it is null. A token Google didn't issue for us, or one with an unverified email, is `401 ID_TOKEN_INVALID`, apart from `TOKEN_INVALID` because the client's next step is to try Google again, not to sign in again; Apple will use it too. `GOOGLE_CLIENT_IDS` is optional outside production, and the route is a 503 without it. Tokens are checked with `jsonwebtoken` against Google's JWKS, fetched with Node's `fetch` and cached for its `max-age`; `jose` 6 is ESM-only and Jest here runs CommonJS. A `kid` the cache lacks refetches at most once in 5 minutes, since the sender chooses the `kid`. |
+| 34 | `POST /auth/apple` links by the verified email only, as Google does (decision 33), and shares its verifier (`src/auth/id-tokens/`). The authorization code must be exchanged for a sign-in to succeed, so every Apple account has a refresh token to revoke. That token is stored as Apple sent it in `apple_grants`, not encrypted: revoking needs the token itself, and without our Apple private key it can only revoke the grant or mint Apple ID tokens for our app. `DELETE /me` revokes it after the delete commits, and the answer doesn't depend on the revoke: a failed revoke is logged, and the account stays deleted, so deletion never depends on Apple being up. iOS only: no Services ID, so no web or Android flow and no `redirect_uri`. No `nonce` check, as with Google. Apple's server-to-server notifications (a user revoking the app from their Apple ID settings) are not handled. The four `APPLE_` settings are all-or-none, the private key is checked to be a P-256 PEM at boot, and production refuses to start without them. |
 
 ## 11. Error codes to add
 
@@ -702,7 +721,7 @@ Append these to `src/core/http/error-code.ts`:
 | `BLOCK_NO_OCCURRENCE` | 422 | A repeating block whose `until` comes before the first day its rule lands on. **Added** (`POST /blocks`, decision 20). |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task or with a block that doesn't repeat, or `recurrence` on a task in a block. **Added** (`POST /tasks`). |
 | `BLOCK_NOT_ON_DATE` | 422 | A task put in a block on a date the block doesn't fall on. **Added** (`POST /tasks`). |
-| `ID_TOKEN_INVALID` | 401 | A Google (later Apple) ID token with a bad signature, another app's audience, the wrong issuer, an expired `exp`, or an unverified email. **Added** (`POST /auth/google`). |
+| `ID_TOKEN_INVALID` | 401 | A Google or Apple ID token with a bad signature, another app's audience, the wrong issuer, an expired `exp`, or an unverified email; or an Apple authorization code Apple refuses. **Added** (`POST /auth/google`, `POST /auth/apple`). |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. **Not needed so far:** a create that inserts in one statement never exposes an unfinished original (decision 19). Add it only for a create that holds its insert open inside a longer transaction. |
 
 ## 12. Changes needed in the Flutter app
@@ -720,6 +739,8 @@ These decisions add behaviour the UI doesn't have yet:
   time zone on app open
 - scheduling local notifications from `/notifications/schedule`, dropping
   times already past
+- passing Sign in with Apple's `authorizationCode`, and `fullName` whenever
+  Apple provides it, to `POST /auth/apple`
 - reading `/review` durations as minutes (`minutes`, `skippedMinutes`,
   `coveredMinutes`) and dividing by 60 for display
 
@@ -729,7 +750,9 @@ These decisions add behaviour the UI doesn't have yet:
   codes to the log, and the service refuses to start with it in production.
 - Google OAuth client IDs for iOS, Android and web, set as `GOOGLE_CLIENT_IDS`.
   Until then `POST /auth/google` answers 503.
-- Apple: Service ID / bundle ID, Team ID, and a Key ID with its private key. These
-  are needed for sign-in, the code exchange and token revocation.
+- Apple: the bundle ID(s), Team ID, and a Sign in with Apple key's ID and `.p8`
+  file, set as `APPLE_CLIENT_IDS`, `APPLE_TEAM_ID`, `APPLE_KEY_ID` and
+  `APPLE_PRIVATE_KEY`. Until then `POST /auth/apple` answers 503. A Services ID
+  and its `redirect_uri` are needed only if Android or web gets Apple sign-in.
 - The day-end job runner, one run per user's local midnight, safe with several
   instances running at once.

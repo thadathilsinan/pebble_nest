@@ -5,6 +5,8 @@ import type { Db } from '../core/database/database.module';
 import type { SessionRow, UserRow } from '../core/database/schema';
 import type { UsersRepository } from '../users/users.repository';
 import type { AccessTokensService } from './access-tokens.service';
+import type { AppleGrantsRepository } from './apple/apple-grants.repository';
+import type { AppleCodeExchange, AppleTokens } from './apple/apple-tokens';
 import { AuthService } from './auth.service';
 import type { IdTokenCheck, IdTokens } from './id-tokens/id-tokens';
 import type { Mailer } from './mailer/mailer';
@@ -105,6 +107,9 @@ describe('AuthService', () => {
   let mailer: Mailer;
   let sendSignInCode: jest.Mock<Promise<void>, [string, string]>;
   let verifyGoogle: jest.Mock<Promise<IdTokenCheck>, [string]>;
+  let verifyApple: jest.Mock<Promise<IdTokenCheck>, [string]>;
+  let exchange: jest.Mock<Promise<AppleCodeExchange>, [string, string]>;
+  let appleGrants: jest.Mocked<Pick<AppleGrantsRepository, 'save'>>;
   let env: Env;
   let service: AuthService;
 
@@ -145,10 +150,16 @@ describe('AuthService', () => {
     };
     verifyGoogle = jest.fn<Promise<IdTokenCheck>, [string]>();
     const googleIdTokens: IdTokens = { verify: verifyGoogle };
+    verifyApple = jest.fn<Promise<IdTokenCheck>, [string]>();
+    const appleIdTokens: IdTokens = { verify: verifyApple };
+    exchange = jest.fn<Promise<AppleCodeExchange>, [string, string]>();
+    const appleTokens: AppleTokens = { exchange, revoke: jest.fn() };
+    appleGrants = { save: jest.fn() };
     env = {
       SIGN_IN_CODE_SECRET: SECRET,
       REFRESH_TOKEN_TTL_DAYS: 60,
       GOOGLE_CLIENT_IDS: ['client-1'],
+      APPLE_CLIENT_IDS: ['com.pebble.app'],
     } as Env;
     // A transaction that just runs its callback: the fakes do not care which
     // executor they are handed.
@@ -163,6 +174,9 @@ describe('AuthService', () => {
       accessTokens as unknown as AccessTokensService,
       mailer,
       googleIdTokens,
+      appleIdTokens,
+      appleTokens,
+      appleGrants as unknown as AppleGrantsRepository,
       db,
       env,
       { setContext: jest.fn(), warn } as unknown as PinoLogger,
@@ -296,6 +310,7 @@ describe('AuthService', () => {
       verifyGoogle.mockResolvedValue({
         outcome: 'verified',
         account: { email: EMAIL, name: 'Ada' },
+        audience: 'client-1',
       });
 
       const result = await service.signInWithGoogle({ idToken: ID_TOKEN });
@@ -317,6 +332,7 @@ describe('AuthService', () => {
       verifyGoogle.mockResolvedValue({
         outcome: 'verified',
         account: { email: EMAIL, name: null },
+        audience: 'client-1',
       });
       users.findOrCreateByEmail.mockResolvedValue({ row: user, created: true });
 
@@ -350,6 +366,122 @@ describe('AuthService', () => {
         failure(service.signInWithGoogle({ idToken: ID_TOKEN })),
       ).resolves.toMatchObject({ status: 503, code: 'SERVICE_UNAVAILABLE' });
       expect(verifyGoogle).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('signInWithApple', () => {
+    const BODY = {
+      identityToken: 'header.payload.signature',
+      authorizationCode: 'the-code',
+    };
+
+    beforeEach(() => {
+      sessions.create.mockImplementation((_, input) =>
+        Promise.resolve({ ...session, signInMethod: input.signInMethod }),
+      );
+      verifyApple.mockResolvedValue({
+        outcome: 'verified',
+        account: { email: EMAIL, name: null },
+        audience: 'com.pebble.app',
+      });
+      exchange.mockResolvedValue({
+        outcome: 'exchanged',
+        refreshToken: 'apple-refresh',
+      });
+    });
+
+    it('signs in the verified email and keeps the grant Apple exchanged the code for', async () => {
+      const result = await service.signInWithApple(BODY);
+
+      expect(verifyApple).toHaveBeenCalledWith(BODY.identityToken);
+      expect(exchange).toHaveBeenCalledWith('the-code', 'com.pebble.app');
+      expect(users.findOrCreateByEmail).toHaveBeenCalledWith({}, EMAIL, null);
+      expect(sessions.create).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({ userId: user.id, signInMethod: 'apple' }),
+      );
+      expect(appleGrants.save).toHaveBeenCalledWith(
+        {},
+        user.id,
+        'com.pebble.app',
+        'apple-refresh',
+      );
+      expect(result).toMatchObject({
+        isNewAccount: false,
+        profile: { id: user.id, signInMethod: 'apple' },
+      });
+    });
+
+    it.each([
+      [{ givenName: ' Ada ', familyName: 'Lovelace' }, 'Ada Lovelace'],
+      [{ givenName: 'Ada', familyName: null }, 'Ada'],
+      [{ familyName: 'Lovelace' }, 'Lovelace'],
+      [{ givenName: '  ', familyName: null }, null],
+      [null, null],
+    ])('names the account from fullName %j', async (fullName, name) => {
+      await service.signInWithApple({ ...BODY, fullName });
+
+      expect(users.findOrCreateByEmail).toHaveBeenCalledWith({}, EMAIL, name);
+    });
+
+    it('flags a new account so the client shows first run', async () => {
+      users.findOrCreateByEmail.mockResolvedValue({ row: user, created: true });
+
+      await expect(service.signInWithApple(BODY)).resolves.toMatchObject({
+        isNewAccount: true,
+      });
+    });
+
+    it('answers ID_TOKEN_INVALID for a token Apple did not sign for us, spending no code', async () => {
+      verifyApple.mockResolvedValue({ outcome: 'invalid' });
+
+      await expect(
+        failure(service.signInWithApple(BODY)),
+      ).resolves.toMatchObject({ status: 401, code: 'ID_TOKEN_INVALID' });
+      expect(exchange).not.toHaveBeenCalled();
+    });
+
+    it('answers ID_TOKEN_INVALID for a code Apple refuses, opening nothing', async () => {
+      exchange.mockResolvedValue({ outcome: 'invalid' });
+
+      await expect(
+        failure(service.signInWithApple(BODY)),
+      ).resolves.toMatchObject({ status: 401, code: 'ID_TOKEN_INVALID' });
+      expect(users.findOrCreateByEmail).not.toHaveBeenCalled();
+    });
+
+    it("answers 503 when Apple's keys cannot be fetched", async () => {
+      verifyApple.mockResolvedValue({ outcome: 'unavailable' });
+
+      await expect(
+        failure(service.signInWithApple(BODY)),
+      ).resolves.toMatchObject({ status: 503, code: 'SERVICE_UNAVAILABLE' });
+      expect(warn).toHaveBeenCalled();
+    });
+
+    it('answers 503 and logs why when the code cannot be exchanged', async () => {
+      exchange.mockResolvedValue({
+        outcome: 'unavailable',
+        reason: 'invalid_client',
+      });
+
+      await expect(
+        failure(service.signInWithApple(BODY)),
+      ).resolves.toMatchObject({ status: 503, code: 'SERVICE_UNAVAILABLE' });
+      expect(warn).toHaveBeenCalledWith(
+        { reason: 'invalid_client' },
+        expect.any(String),
+      );
+      expect(users.findOrCreateByEmail).not.toHaveBeenCalled();
+    });
+
+    it('answers 503 without checking anything when Apple is not set up', async () => {
+      env.APPLE_CLIENT_IDS = [];
+
+      await expect(
+        failure(service.signInWithApple(BODY)),
+      ).resolves.toMatchObject({ status: 503, code: 'SERVICE_UNAVAILABLE' });
+      expect(verifyApple).not.toHaveBeenCalled();
     });
   });
 

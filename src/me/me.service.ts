@@ -1,4 +1,10 @@
 import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { PinoLogger } from 'nestjs-pino';
+import {
+  AppleGrantsRepository,
+  type AppleGrant,
+} from '../auth/apple/apple-grants.repository';
+import { APPLE_TOKENS, type AppleTokens } from '../auth/apple/apple-tokens';
 import type { Caller } from '../auth/caller';
 import { accessTokenInvalid } from '../auth/errors';
 import { SessionsRepository } from '../auth/sessions.repository';
@@ -20,7 +26,12 @@ export class MeService {
     private readonly sessions: SessionsRepository,
     private readonly signInCodes: SignInCodesRepository,
     private readonly users: UsersRepository,
-  ) {}
+    private readonly appleGrants: AppleGrantsRepository,
+    @Inject(APPLE_TOKENS) private readonly appleTokens: AppleTokens,
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(MeService.name);
+  }
 
   /**
    * The caller's `Profile`. It reads the session because
@@ -101,18 +112,43 @@ export class MeService {
    * a 401, because the session went with the account (decision 18).
    *
    * Every user-owned table must cascade from `users`, so that this stays one
-   * delete. Sign in with Apple token revocation joins this method with the
-   * Apple sign-in slice.
+   * delete.
+   *
+   * An account that signed in with Apple has its Apple grant revoked, as App
+   * Review requires. That happens after the commit and is best-effort
+   * (decision 34): the account is gone whether or not Apple answers, and a
+   * failure is logged rather than undoing the delete.
    */
   async delete(caller: Caller): Promise<void> {
-    await this.db.transaction(async (tx) => {
-      await this.liveSession(tx, caller);
+    const grant = await this.db.transaction(
+      async (tx): Promise<AppleGrant | null> => {
+        await this.liveSession(tx, caller);
 
-      const user = await this.users.deleteById(tx, caller.userId);
-      if (user === null) throw accessTokenInvalid();
+        // Read before the delete, whose cascade removes it.
+        const appleGrant = await this.appleGrants.findByUserId(
+          tx,
+          caller.userId,
+        );
 
-      await this.signInCodes.deleteByEmail(tx, user.email);
-    });
+        const user = await this.users.deleteById(tx, caller.userId);
+        if (user === null) throw accessTokenInvalid();
+
+        await this.signInCodes.deleteByEmail(tx, user.email);
+
+        return appleGrant;
+      },
+    );
+
+    if (grant === null) return;
+
+    try {
+      await this.appleTokens.revoke(grant);
+    } catch (error) {
+      this.logger.error(
+        { err: error, userId: caller.userId },
+        'Apple grant not revoked after account deletion',
+      );
+    }
   }
 
   /** The `Profile` for `user` on the device holding `session`. */

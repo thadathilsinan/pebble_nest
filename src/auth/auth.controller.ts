@@ -1,6 +1,7 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
+import { AppleSignInBody } from './dto/apple-sign-in.dto';
 import { GoogleSignInBody } from './dto/google-sign-in.dto';
 import { RefreshSessionBody } from './dto/refresh-session.dto';
 import { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
@@ -32,6 +33,13 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   signInWithGoogle(@Body() body: GoogleSignInBody) {
     return this.auth.signInWithGoogle(body);
+  }
+
+  // 200 for the same reason as email/verify.
+  @Post('apple')
+  @HttpCode(HttpStatus.OK)
+  signInWithApple(@Body() body: AppleSignInBody) {
+    return this.auth.signInWithApple(body);
   }
 
   // 200 for the same reason as verify: a new session state, not a resource.

@@ -12,7 +12,15 @@ export interface IdTokenAccount {
  * `unavailable` is ours, since the provider's keys could not be fetched (503).
  */
 export type IdTokenCheck =
-  | { outcome: 'verified'; account: IdTokenAccount }
+  | {
+      outcome: 'verified';
+      account: IdTokenAccount;
+      /**
+       * Which of our client IDs the token was issued to. Apple's code
+       * exchange has to name the same one.
+       */
+      audience: string;
+    }
   | { outcome: 'invalid' }
   | { outcome: 'unavailable' };
 

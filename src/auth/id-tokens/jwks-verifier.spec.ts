@@ -70,7 +70,14 @@ describe('JwksVerifier', () => {
     await expect(verifier.verify(token())).resolves.toEqual({
       outcome: 'verified',
       account: { email: 'me@example.com', name: 'Ada Lovelace' },
+      audience: CLIENT_ID,
     });
+  });
+
+  it('names our client ID a multi-audience token was issued to', async () => {
+    await expect(
+      verifier.verify(token(CLAIMS, { audience: ['someone-else', CLIENT_ID] })),
+    ).resolves.toMatchObject({ outcome: 'verified', audience: CLIENT_ID });
   });
 
   it('accepts every spelling of the issuer', async () => {

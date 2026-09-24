@@ -89,10 +89,16 @@ export class JwksVerifier implements IdTokens {
     }
 
     const account = accountFrom(claims);
+    if (account === null) return { outcome: 'invalid' };
 
-    return account === null
-      ? { outcome: 'invalid' }
-      : { outcome: 'verified', account };
+    // `verify` has checked that at least one audience is ours.
+    const audiences = [claims.aud].flat();
+    const audience = this.options.audiences.find((id) =>
+      audiences.includes(id),
+    );
+    if (audience === undefined) return { outcome: 'invalid' };
+
+    return { outcome: 'verified', account, audience };
   }
 
   /**

@@ -60,7 +60,11 @@ class FakeGoogleIdTokens implements IdTokens {
   /** A token that proves `email`, with Google's `name` for the person. */
   tokenFor(email: string, name: string | null = null): string {
     const token = `google.${this.verdicts.size}.token`;
-    this.verdicts.set(token, { outcome: 'verified', account: { email, name } });
+    this.verdicts.set(token, {
+      outcome: 'verified',
+      account: { email, name },
+      audience: 'ios-client',
+    });
     return token;
   }
 }
