@@ -37,30 +37,34 @@ export class DaysService {
 
   /**
    * Every day from `from` to `to`, both included, from one read each of the
-   * caller's series, their tasks, their chosen traces and their skipped
-   * occurrences. It does not read the session (decision 16).
+   * caller's series, their tasks, their chosen traces and their occurrence
+   * exceptions. It does not read the session (decision 16).
    */
   async list(caller: Caller, from: string, to: string): Promise<Day[]> {
     // The day before `from`, for the tails of blocks that began then and the
     // tasks those tails hold.
     const since = addDays(from, -1);
-    const [rows, taskRows, traceRows, skippedRows] = await Promise.all([
+    const [rows, taskRows, traceRows, exceptionRows] = await Promise.all([
       this.blocks.findActiveBetween(this.db, caller.userId, since, to),
       this.tasks.findBetween(this.db, caller.userId, since, to),
       this.names.findTraces(this.db, caller.userId),
-      this.occurrences.findSkippedBetween(this.db, caller.userId, since, to),
+      this.occurrences.findBetween(this.db, caller.userId, since, to),
     ]);
     const tasks = groupTasks(taskRows.map(toTask));
     const traces = tracesByName(traceRows);
-    const skipped = new Set(
-      skippedRows.map((row) => slot(row.blockSeriesId, row.date)),
-    );
+    const skipped = new Set<string>();
+    const deleted = new Set<string>();
+    for (const row of exceptionRows) {
+      const key = slot(row.blockSeriesId, row.date);
+      if (row.skipped) skipped.add(key);
+      if (row.deleted) deleted.add(key);
+    }
 
     const days: Day[] = [];
     for (let date = from; date <= to; date = addDays(date, 1)) {
       days.push({
         date,
-        blocks: blocksOn(rows, date, tasks, traces, skipped),
+        blocks: blocksOn(rows, date, tasks, traces, { skipped, deleted }),
         generalList: tasks.get(slot(null, date)) ?? [],
       });
     }
@@ -89,19 +93,25 @@ function groupTasks(tasks: Task[]): Map<string, Task[]> {
   return out;
 }
 
+/** The `slot`s of occurrences that are skipped, and of those deleted. */
+interface Exceptions {
+  skipped: ReadonlySet<string>;
+  deleted: ReadonlySet<string>;
+}
+
 /**
  * The occurrences that start on `date`, plus the tails of those that started
  * the day before and cross midnight (BLK-04). A block ending exactly at
- * midnight has no tail: nothing of it falls on the next day. `skipped` holds
- * the `slot`s of skipped occurrences, and a tail is skipped with its
- * occurrence.
+ * midnight has no tail: nothing of it falls on the next day. A tail is
+ * skipped with its occurrence, and a deleted occurrence is left out along
+ * with its tail.
  */
 function blocksOn(
   rows: BlockSeriesRow[],
   date: string,
   tasks: Map<string, Task[]>,
   traces: ReadonlyMap<string, ChosenTrace>,
-  skipped: ReadonlySet<string>,
+  { skipped, deleted }: Exceptions,
 ): BlockOccurrence[] {
   const yesterday = addDays(date, -1);
   const out: BlockOccurrence[] = [];
@@ -109,23 +119,24 @@ function blocksOn(
   for (const row of rows) {
     const recurrence = recurrenceOf(row);
     const trace = chosenTraceFor(traces, row.name);
+    const tail = slot(row.id, yesterday);
     if (
       crossesMidnight(row) &&
       row.endMin > 0 &&
-      occursOn(recurrence, row.anchorDate, yesterday)
+      occursOn(recurrence, row.anchorDate, yesterday) &&
+      !deleted.has(tail)
     ) {
       // A tail holds the tasks of the occurrence it ends, as the app shows.
-      const key = slot(row.id, yesterday);
       out.push(
         toBlockOccurrence(row, yesterday, trace, {
           continuedFromPreviousDay: true,
-          tasks: tasks.get(key) ?? [],
-          skipped: skipped.has(key),
+          tasks: tasks.get(tail) ?? [],
+          skipped: skipped.has(tail),
         }),
       );
     }
-    if (occursOn(recurrence, row.anchorDate, date)) {
-      const key = slot(row.id, date);
+    const key = slot(row.id, date);
+    if (occursOn(recurrence, row.anchorDate, date) && !deleted.has(key)) {
       out.push(
         toBlockOccurrence(row, date, trace, {
           tasks: tasks.get(key) ?? [],

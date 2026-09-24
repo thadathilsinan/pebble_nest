@@ -43,9 +43,12 @@ describe('BlockOccurrencesRepository (integration)', () => {
     from = '2026-01-01',
     to = '2026-12-31',
   ) {
-    return repo
-      .findSkippedBetween(t.db, userId, from, to)
-      .then((rows) => rows.map((row) => row.date).sort());
+    return repo.findBetween(t.db, userId, from, to).then((rows) =>
+      rows
+        .filter((row) => row.skipped)
+        .map((row) => row.date)
+        .sort(),
+    );
   }
 
   it('skips an occurrence, and a second skip keeps one row', async () => {
@@ -84,6 +87,31 @@ describe('BlockOccurrencesRepository (integration)', () => {
     expect(await skippedDates(userId, '2026-09-24', '2026-09-26')).toEqual([
       '2026-09-24',
       '2026-09-26',
+    ]);
+  });
+
+  it('marks an occurrence deleted, keeping its skip, and un-skip leaves it', async () => {
+    const userId = await newUser();
+    const seriesId = await newSeries(userId);
+    await repo.skip(t.db, userId, seriesId, '2026-09-25');
+
+    await repo.markDeleted(t.db, userId, seriesId, '2026-09-25');
+    await repo.markDeleted(t.db, userId, seriesId, '2026-09-26');
+    await repo.unskip(t.db, seriesId, '2026-09-25');
+
+    const rows = await repo.findBetween(
+      t.db,
+      userId,
+      '2026-09-25',
+      '2026-09-26',
+    );
+    expect(
+      rows
+        .map(({ date, skipped, deleted }) => ({ date, skipped, deleted }))
+        .sort((a, b) => a.date.localeCompare(b.date)),
+    ).toEqual([
+      { date: '2026-09-25', skipped: true, deleted: true },
+      { date: '2026-09-26', skipped: false, deleted: true },
     ]);
   });
 

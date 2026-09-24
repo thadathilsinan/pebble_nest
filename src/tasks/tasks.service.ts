@@ -55,13 +55,17 @@ export class TasksService {
     }
 
     if (body.blockSeriesId != null) {
-      const series = await this.blocks.findById(
+      const found = await this.blocks.findOccurrence(
         this.db,
         caller.userId,
         body.blockSeriesId,
+        body.date,
       );
-      assertOccursOn(series, body.date);
-      if (body.repeatWithBlock === true && series.recurrenceKind === 'none') {
+      assertOccursOn(found, body.date);
+      if (
+        body.repeatWithBlock === true &&
+        found.series.recurrenceKind === 'none'
+      ) {
         throw repeatNotAllowed();
       }
     }
@@ -216,7 +220,12 @@ export class TasksService {
       if (task === null) throw taskNotFound();
       if (body.blockSeriesId !== null) {
         assertOccursOn(
-          await this.blocks.findById(tx, caller.userId, body.blockSeriesId),
+          await this.blocks.findOccurrence(
+            tx,
+            caller.userId,
+            body.blockSeriesId,
+            body.date,
+          ),
           body.date,
         );
       }

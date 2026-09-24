@@ -1,7 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, gte, isNull, lte, or } from 'drizzle-orm';
+import { and, eq, gt, gte, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
-import { blockSeries, type BlockSeriesRow } from '../core/database/schema';
+import {
+  blockOccurrenceExceptions,
+  blockSeries,
+  type BlockSeriesRow,
+} from '../core/database/schema';
+import type { FoundOccurrence } from './block-occurrence';
 
 /** The columns `POST /blocks` writes. */
 export type NewBlockSeries = Pick<
@@ -88,6 +93,65 @@ export class BlocksRepository {
       .limit(1);
 
     return row ?? null;
+  }
+
+  /**
+   * One of the user's series, with whether its occurrence starting on `date`
+   * has been deleted, for `assertOccursOn` to judge. `lock` holds the series
+   * row until the transaction ends, so two writes to its occurrences take
+   * turns; the exception is read after the lock is granted, so it is never
+   * older than the lock.
+   */
+  async findOccurrence(
+    ex: Executor,
+    userId: string,
+    seriesId: string,
+    date: string,
+    { lock = false }: { lock?: boolean } = {},
+  ): Promise<FoundOccurrence | null> {
+    const query = ex
+      .select()
+      .from(blockSeries)
+      .where(and(eq(blockSeries.userId, userId), eq(blockSeries.id, seriesId)))
+      .limit(1);
+    const [series] = await (lock ? query.for('update') : query);
+    if (series === undefined) return null;
+
+    const [exception] = await ex
+      .select({ deleted: blockOccurrenceExceptions.deleted })
+      .from(blockOccurrenceExceptions)
+      .where(
+        and(
+          eq(blockOccurrenceExceptions.blockSeriesId, seriesId),
+          eq(blockOccurrenceExceptions.date, date),
+        ),
+      )
+      .limit(1);
+    return { series, deleted: exception?.deleted ?? false };
+  }
+
+  /**
+   * Ends the series on `until`, bumping `version`, unless it already ends by
+   * then. A later `until` never extends it.
+   */
+  async endBy(ex: Executor, id: string, until: string): Promise<void> {
+    await ex
+      .update(blockSeries)
+      .set({ until, version: sql`${blockSeries.version} + 1` })
+      .where(
+        and(
+          eq(blockSeries.id, id),
+          or(isNull(blockSeries.until), gt(blockSeries.until, until)),
+        ),
+      );
+  }
+
+  /**
+   * Deletes the series. Its exceptions go with it; its tasks' block is set
+   * null, so a caller wanting them moved properly moves them first.
+   */
+  async delete(ex: Executor, id: string): Promise<void> {
+    await ex.delete(blockSeries).where(eq(blockSeries.id, id));
   }
 
   /**

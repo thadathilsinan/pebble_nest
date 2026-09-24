@@ -184,7 +184,7 @@ Screens: block slip, block sheet.
 |---|---|---|---|
 | POST | `/blocks` | `{ name, date, startMin, endMin, recurrence?, alert, idempotencyKey? }` | `BlockOccurrence` (201). **Built.** See below. |
 | PATCH | `/blocks/{seriesId}/occurrences/{date}` | `{ version, scope, name?, startMin?, endMin?, newDate?, recurrence?, alert? }` | `BlockOccurrence` |
-| DELETE | `/blocks/{seriesId}/occurrences/{date}` | `?scope=onlyThis\|series` | `{ movedTaskCount }` (200) |
+| DELETE | `/blocks/{seriesId}/occurrences/{date}` | `?scope=onlyThis\|series` | `{ movedTaskCount }` (200). **Built.** See below. |
 | POST | `/blocks/{seriesId}/occurrences/{date}/skip` | — | `{ movedTaskCount }` (200). **Built.** See below. |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}/skip` | — | 204. **Built.** See below. |
 | GET | `/block-names` | `?q=` | `{ items: [string] }`. **Built.** See below. |
@@ -221,13 +221,32 @@ Screens: block slip, block sheet.
   | Scope | Effect |
   |---|---|
   | `onlyThis` (the default) | Deletes this occurrence. |
-  | `series` | Deletes the whole series from today onward and ends it. Occurrences before today stay in the history. |
+  | `series` | Deletes the whole series from today onward and ends it, and the occurrence named too, even a past one. Other occurrences before today stay in the history (decision 29). |
 
   Tasks in a deleted occurrence, open and done, move to that day's general list
   (BLK-10). With `series`, copies of tasks that repeat with the block are removed
   for dates after today, and one-off tasks in future occurrences move to their own
   day's general list. The response returns 200 with a count, a stated exception to
   the 204 rule, because the UI shows "3 tasks moved to the general list".
+- **Delete (built):** the 400, 404 and 422 checks are skip's, plus a
+  `scope` other than `onlyThis` or `series` (the default is `onlyThis`) is
+  `400 VALIDATION_FAILED`. A block that doesn't repeat is deleted outright
+  whatever the scope. `onlyThis` on a repeating block marks the occurrence
+  `deleted` in `block_occurrence_exceptions`. `series` sets `until` to the
+  earlier of its own and yesterday, bumping `seriesVersion`, and marks a past
+  named occurrence deleted; a series left with no occurrence before today is
+  deleted outright instead. Every task in a deleted occurrence, open and done,
+  moves to its own day's general list, each bumping its `version`, **and an
+  open one on a closed day carries forward to today** as skip carries it.
+  `movedTaskCount` counts them all. There is no `version` and the last write
+  wins. The series row and the tasks are locked. **A deleted occurrence is
+  gone:** `GET /days` leaves it out along with its midnight tail, and a retry,
+  skip, un-skip, `POST /tasks` or `/tasks/{id}/move` naming it gets
+  `404 NOT_FOUND`. A `series` retry naming today or later gets
+  `422 BLOCK_NOT_ON_DATE` instead, since the series now ends before it. A
+  deleted account's token gets `401 TOKEN_INVALID`, because delete reads the
+  user's time zone. It does not read the session (decision 16). Removing task
+  copies that repeat with the block waits for the task series slice.
 - **Skip:** open tasks move to the general list, and repeating ones split off as
   one-offs (BLK-07). Un-skipping restores the status; tasks already moved stay
   where they are (BLK-08).
@@ -546,6 +565,7 @@ request turns out to be slow.
 | 26 | `POST /tasks/{id}/move` carries no `version` and is last-write-wins, like `/done`. A done task's `completed` entry moves with it. An open task moved onto a closed day carries forward at once (decision 2). A closed day that already recorded the task keeps its entry (`ON CONFLICT DO NOTHING`), and `carryCount` counts the carry again. `DELETE /tasks/{id}` ignores `scope` for a one-off, as the app does, and gets 404 on a retry. |
 | 27 | Block-name traces live in `block_name_traces`, keyed by the name trimmed and lower-cased in JavaScript, with no `version`. The server ports the app's default-trace hash (32-bit FNV-1a over UTF-16 code units, modulo the app's 9 traces; `src/block-names/block-name.ts`), so choosing the default deletes the row, as the app's `chooseTraceForName` does. A name whose default is `open` keeps any choice once made, as in the app. `PUT` is kept over the `PATCH` that adding-a-feature §4.4 prefers, since each request replaces the whole resource. JavaScript and Dart lower-case a few characters differently; that is accepted. `GET /block-names` counts every series, ended ones included. |
 | 28 | A per-occurrence change lives in `block_occurrence_exceptions`, one row per series and start date, keyed `(block_series_id, date)`, which holds only `skipped` until occurrence edit and delete add their columns. Un-skipping deletes the row. Skip and un-skip are their own module (`src/block-occurrences/`), since skipping moves tasks and `TasksModule` already imports `BlocksModule`. `POST …/skip` answers 200, since it is an action rather than a create. Skipping a closed day's occurrence carries its open tasks to today, as `/move` does (decision 26), rather than leaving them on the closed day as the app would. |
+| 29 | Deleting a block occurrence marks it `deleted` in `block_occurrence_exceptions`, for good. `scope=series` deletes every occurrence from today on **and the occurrence named, even a past one**, so the block the user tapped always goes; this departs from the app, which ends the series the day before the named occurrence. A deleted occurrence's open tasks on a closed day carry forward to today, as skip's do (decision 28). A deleted occurrence is `404 NOT_FOUND` wherever it is named, while a date the rule never lands on stays `422 BLOCK_NOT_ON_DATE`. A series with nothing left before today is deleted rather than ended. |
 
 ## 11. Error codes to add
 

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, or, sql } from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
 import {
   taskLedgerEntries,
@@ -134,6 +134,34 @@ export class TasksRepository {
           eq(tasks.blockSeriesId, blockSeriesId),
           eq(tasks.date, date),
           eq(tasks.done, false),
+        ),
+      )
+      .orderBy(tasks.id)
+      .for('update');
+  }
+
+  /**
+   * The tasks, open and done, in the occurrence of `blockSeriesId` that
+   * starts on `date`, and with `from` in every occurrence starting on or
+   * after it too. Locked until the transaction ends, as
+   * `findOpenInOccurrenceForUpdate` locks. Uses `idx_tasks_block_series_id`.
+   */
+  findInSeriesForUpdate(
+    ex: Executor,
+    userId: string,
+    blockSeriesId: string,
+    { date, from }: { date: string; from?: string },
+  ): Promise<TaskRow[]> {
+    return ex
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.userId, userId),
+          eq(tasks.blockSeriesId, blockSeriesId),
+          from === undefined
+            ? eq(tasks.date, date)
+            : or(eq(tasks.date, date), gte(tasks.date, from)),
         ),
       )
       .orderBy(tasks.id)

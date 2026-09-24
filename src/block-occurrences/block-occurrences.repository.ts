@@ -32,8 +32,31 @@ export class BlockOccurrencesRepository {
   }
 
   /**
-   * Un-skips the occurrence. Skipping is all an exception holds so far, so
-   * that is deleting its row; an occurrence with none is left as it is.
+   * Marks the occurrence deleted (BLK-10), creating its exception row or
+   * updating the one there. Deleting is for good: nothing clears it.
+   */
+  async markDeleted(
+    ex: Executor,
+    userId: string,
+    blockSeriesId: string,
+    date: string,
+  ): Promise<void> {
+    await ex
+      .insert(blockOccurrenceExceptions)
+      .values({ userId, blockSeriesId, date, deleted: true })
+      .onConflictDoUpdate({
+        target: [
+          blockOccurrenceExceptions.blockSeriesId,
+          blockOccurrenceExceptions.date,
+        ],
+        set: { deleted: true },
+      });
+  }
+
+  /**
+   * Un-skips the occurrence. Skipping is all a live occurrence's exception
+   * holds so far, so that is deleting its row; an occurrence with none is
+   * left as it is, and so is a deleted one's row.
    */
   async unskip(
     ex: Executor,
@@ -46,15 +69,17 @@ export class BlockOccurrencesRepository {
         and(
           eq(blockOccurrenceExceptions.blockSeriesId, blockSeriesId),
           eq(blockOccurrenceExceptions.date, date),
+          eq(blockOccurrenceExceptions.deleted, false),
         ),
       );
   }
 
   /**
-   * The user's skipped occurrences starting from `from` to `to`, both
-   * included. Uses `idx_block_occurrence_exceptions_user_id_date`.
+   * The user's exceptions for occurrences starting from `from` to `to`,
+   * both included: the skipped and the deleted. Uses
+   * `idx_block_occurrence_exceptions_user_id_date`.
    */
-  findSkippedBetween(
+  findBetween(
     ex: Executor,
     userId: string,
     from: string,
@@ -68,7 +93,6 @@ export class BlockOccurrencesRepository {
           eq(blockOccurrenceExceptions.userId, userId),
           gte(blockOccurrenceExceptions.date, from),
           lte(blockOccurrenceExceptions.date, to),
-          eq(blockOccurrenceExceptions.skipped, true),
         ),
       );
   }

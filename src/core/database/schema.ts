@@ -377,11 +377,11 @@ export type BlockSeriesRow = typeof blockSeries.$inferSelect;
  * the occurrence that starts on `date`. A date with no row is the series as
  * it stands.
  *
- * Only `skipped` so far (BLK-07/08). Editing and deleting one occurrence add
- * their columns with their slices.
+ * `skipped` (BLK-07/08) and `deleted` (BLK-10) so far. Editing one
+ * occurrence adds its columns with its slice.
  *
- * No `version` or `idempotency_key`: skipping sets an absolute value, so the
- * last write wins and a retry is harmless.
+ * No `version` or `idempotency_key`: skipping and deleting set absolute
+ * values, so the last write wins and a retry is harmless.
  */
 export const blockOccurrenceExceptions = pgTable(
   'block_occurrence_exceptions',
@@ -393,6 +393,8 @@ export const blockOccurrenceExceptions = pgTable(
     blockSeriesId: uuid('block_series_id').notNull(),
     date: date('date', { mode: 'string' }).notNull(),
     skipped: boolean('skipped').notNull().default(false),
+    // The occurrence is gone for good; nothing un-deletes it.
+    deleted: boolean('deleted').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
