@@ -704,3 +704,313 @@ describe('PATCH /tasks/{id}/done (e2e)', () => {
     expect(codeOf(res.body)).toBe('TOKEN_INVALID');
   });
 });
+
+describe('PATCH /tasks/{id} (e2e)', () => {
+  let app: NestExpressApplication;
+  let pool: Pool;
+  let mailer: FakeMailer;
+  let accessToken: string;
+  let future: string;
+
+  type Edited = Task & { notes: string; reminderAt: string | null };
+  type Stale = { error: { code: string; meta: { current: Edited } } };
+
+  beforeEach(async () => {
+    mailer = new FakeMailer();
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    })
+      .overrideProvider(MAILER)
+      .useValue(mailer)
+      .compile();
+
+    app = moduleFixture.createNestApplication<NestExpressApplication>({
+      bodyParser: false,
+    });
+    configureApp(app, moduleFixture.get<Env>(ENV));
+    await app.init();
+
+    pool = moduleFixture.get<Pool>(POOL);
+    await pool.query(
+      'TRUNCATE users, sessions, session_refresh_tokens, email_sign_in_codes, block_series, tasks, task_ledger_entries RESTART IDENTITY CASCADE',
+    );
+    accessToken = await signIn('me@example.com');
+    future = addDays(todayIn('UTC'), 3);
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  function http() {
+    return request(app.getHttpServer());
+  }
+
+  async function signIn(email: string): Promise<string> {
+    await http().post('/api/v1/auth/email/code').send({ email }).expect(204);
+    const res = await http()
+      .post('/api/v1/auth/email/verify')
+      .send({ email, code: mailer.lastCodeFor(email) })
+      .expect(200);
+    return (res.body as { data: { accessToken: string } }).data.accessToken;
+  }
+
+  async function createTask(body: object): Promise<Edited> {
+    const res = await http()
+      .post('/api/v1/tasks')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send(body)
+      .expect(201);
+    return (res.body as { data: Edited }).data;
+  }
+
+  async function postBlock(body: object): Promise<string> {
+    const res = await http()
+      .post('/api/v1/blocks')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({
+        name: 'Deep work',
+        date: future,
+        startMin: 540,
+        endMin: 600,
+        alert: false,
+        ...body,
+      })
+      .expect(201);
+    return (res.body as { data: { seriesId: string } }).data.seriesId;
+  }
+
+  function patchTask(id: string, body: object, token = accessToken) {
+    return http()
+      .patch(`/api/v1/tasks/${id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body);
+  }
+
+  async function editTask(id: string, body: object): Promise<Edited> {
+    const res = await patchTask(id, body).expect(200);
+    return (res.body as { data: Edited }).data;
+  }
+
+  async function setDone(id: string, done: boolean): Promise<Edited> {
+    const res = await http()
+      .patch(`/api/v1/tasks/${id}/done`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ done })
+      .expect(200);
+    return (res.body as { data: Edited }).data;
+  }
+
+  async function getDay(date: string): Promise<Day> {
+    const res = await http()
+      .get(`/api/v1/days/${date}`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(200);
+    return (res.body as { data: Day }).data;
+  }
+
+  async function setTimeZone(timeZone: string) {
+    await http()
+      .patch('/api/v1/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ timeZone })
+      .expect(200);
+  }
+
+  async function ledgerTitles(): Promise<string[]> {
+    const { rows } = await pool.query<{ title: string }>(
+      'SELECT title FROM task_ledger_entries ORDER BY day',
+    );
+    return rows.map((r) => r.title);
+  }
+
+  function codeOf(body: unknown): string {
+    return (body as Failure).error.code;
+  }
+
+  it('edits the title, notes and reminder', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    const edited = await editTask(task.id, {
+      version: 0,
+      title: '  Call the bank  ',
+      notes: 'Ask about the fee',
+      reminderAt: `${future}T17:30`,
+    });
+
+    expect(edited).toEqual({
+      ...task,
+      version: 1,
+      title: 'Call the bank',
+      notes: 'Ask about the fee',
+      reminderAt: `${future}T17:30`,
+    });
+    expect((await getDay(future)).generalList).toEqual([edited]);
+  });
+
+  it('clears the reminder with null and leaves absent fields alone', async () => {
+    const task = await createTask({
+      title: 'A',
+      date: future,
+      notes: 'Keep',
+      reminderAt: `${future}T09:00`,
+    });
+
+    const edited = await editTask(task.id, { version: 0, reminderAt: null });
+
+    expect(edited).toMatchObject({
+      title: 'A',
+      notes: 'Keep',
+      reminderAt: null,
+      version: 1,
+    });
+  });
+
+  it('changes nothing, not even the version, for a patch with nothing new', async () => {
+    const task = await createTask({
+      title: 'A',
+      date: future,
+      reminderAt: `${future}T09:00`,
+    });
+
+    for (const body of [
+      { version: 0 },
+      { version: 0, title: ' A ', notes: '', reminderAt: `${future}T09:00` },
+      { version: 0, repeatWithBlock: false, recurrence: { kind: 'none' } },
+    ]) {
+      expect(await editTask(task.id, body)).toEqual(task);
+    }
+  });
+
+  it('refuses a stale version with the task as it now is', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const done = await setDone(task.id, true);
+
+    const res = await patchTask(task.id, { version: 0, title: 'B' }).expect(
+      409,
+    );
+
+    expect(codeOf(res.body)).toBe('STALE_VERSION');
+    expect((res.body as Stale).error.meta.current).toEqual(done);
+  });
+
+  it('gives every day the task recorded its new title', async () => {
+    await setTimeZone(AHEAD);
+    const today = todayIn(AHEAD);
+    const task = await createTask({ title: 'A', date: addDays(today, -2) });
+    const done = await setDone(task.id, true);
+
+    await editTask(task.id, { version: done.version, title: 'B' });
+
+    expect(await ledgerTitles()).toEqual(['B', 'B', 'B']);
+  });
+
+  it('neither moves nor carries a task on a closed day', async () => {
+    await setTimeZone(BEHIND);
+    const date = todayIn(BEHIND);
+    const task = await createTask({ title: 'A', date });
+    const done = await setDone(task.id, true);
+    await setTimeZone(AHEAD);
+
+    const edited = await editTask(task.id, {
+      version: done.version,
+      title: 'B',
+    });
+
+    expect(edited).toMatchObject({ date, done: true, carryCount: 0 });
+  });
+
+  it('refuses bad input', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    for (const [id, body] of [
+      ['not-a-uuid', { version: 0 }],
+      [task.id, {}],
+      [task.id, { title: 'B' }],
+      [task.id, { version: -1 }],
+      [task.id, { version: 0, title: '   ' }],
+      [task.id, { version: 0, title: 'x'.repeat(201) }],
+      [task.id, { version: 0, notes: 'x'.repeat(10_001) }],
+      [task.id, { version: 0, reminderAt: `${future}T24:00` }],
+      [task.id, { version: 0, date: future }],
+      [task.id, { version: 0, blockSeriesId: null }],
+      [task.id, { version: 0, done: true }],
+    ] as const) {
+      const res = await patchTask(id, body).expect(400);
+      expect(codeOf(res.body)).toBe('VALIDATION_FAILED');
+    }
+  });
+
+  it('refuses a repeat that does not fit where the task sits', async () => {
+    const general = await createTask({ title: 'A', date: future });
+    const oneOffBlock = await postBlock({});
+    const inBlock = await createTask({
+      title: 'B',
+      date: future,
+      blockSeriesId: oneOffBlock,
+    });
+
+    for (const [id, body] of [
+      [general.id, { repeatWithBlock: true }],
+      [inBlock.id, { repeatWithBlock: true }],
+      [inBlock.id, { recurrence: { kind: 'daily' } }],
+    ] as const) {
+      const res = await patchTask(id, { version: 0, ...body }).expect(422);
+      expect(codeOf(res.body)).toBe('REPEAT_NOT_ALLOWED');
+    }
+  });
+
+  it('answers 501 for a repeat that fits, until repeating tasks exist', async () => {
+    const general = await createTask({ title: 'A', date: future });
+    const daily = await postBlock({ recurrence: { kind: 'daily' } });
+    const inBlock = await createTask({
+      title: 'B',
+      date: future,
+      blockSeriesId: daily,
+    });
+
+    for (const [id, body] of [
+      [general.id, { recurrence: { kind: 'daily' } }],
+      [inBlock.id, { repeatWithBlock: true }],
+    ] as const) {
+      const res = await patchTask(id, {
+        version: 0,
+        title: 'C',
+        ...body,
+      }).expect(501);
+      expect(codeOf(res.body)).toBe('NOT_IMPLEMENTED');
+    }
+    expect((await getDay(future)).generalList).toEqual([general]);
+  });
+
+  it('answers 404 for an unknown task, someone else’s, or a deleted account', async () => {
+    const task = await createTask({ title: 'A', date: future });
+    const them = await signIn('them@example.com');
+
+    for (const [id, token] of [
+      ['0192a000-0000-7000-8000-000000000009', accessToken],
+      [task.id, them],
+    ] as const) {
+      const res = await patchTask(id, { version: 0 }, token).expect(404);
+      expect(codeOf(res.body)).toBe('NOT_FOUND');
+    }
+
+    await http()
+      .delete('/api/v1/me')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+    const res = await patchTask(task.id, { version: 0 }).expect(404);
+    expect(codeOf(res.body)).toBe('NOT_FOUND');
+  });
+
+  it('lets one of two edits at the same version through', async () => {
+    const task = await createTask({ title: 'A', date: future });
+
+    const statuses = await Promise.all([
+      patchTask(task.id, { version: 0, title: 'B' }),
+      patchTask(task.id, { version: 0, title: 'C' }),
+    ]).then((all) => all.map((r) => r.status).sort());
+
+    expect(statuses).toEqual([200, 409]);
+  });
+});

@@ -3,6 +3,7 @@ import type { Caller } from '../auth/caller';
 import { CurrentCaller } from '../auth/current-caller.decorator';
 import { CreateTaskBody } from './dto/create-task.dto';
 import { SetTaskDoneBody, TaskIdParams } from './dto/set-task-done.dto';
+import { UpdateTaskBody } from './dto/update-task.dto';
 import { TasksService } from './tasks.service';
 
 @Controller('tasks')
@@ -12,6 +13,15 @@ export class TasksController {
   @Post()
   create(@CurrentCaller() caller: Caller, @Body() body: CreateTaskBody) {
     return this.tasks.create(caller, body);
+  }
+
+  @Patch(':id')
+  update(
+    @CurrentCaller() caller: Caller,
+    @Param() { id }: TaskIdParams,
+    @Body() body: UpdateTaskBody,
+  ) {
+    return this.tasks.update(caller, id, body);
   }
 
   @Patch(':id/done')

@@ -20,6 +20,11 @@ export type NewTask = Pick<
   | 'carryCount'
 > & { idempotencyKey?: string };
 
+/** The columns `PATCH /tasks/{id}` edits. */
+export type TaskChanges = Partial<
+  Pick<TaskRow, 'title' | 'notes' | 'reminderDate' | 'reminderMin'>
+>;
+
 @Injectable()
 export class TasksRepository {
   /**
@@ -151,6 +156,41 @@ export class TasksRepository {
         target: [taskLedgerEntries.taskId, taskLedgerEntries.day],
         set: { outcome: 'completed', title: task.title },
       });
+  }
+
+  /**
+   * Writes `changes` to the task and bumps `version` once. The caller holds
+   * the row's lock, has checked the version, and passes only fields that
+   * differ.
+   */
+  async update(
+    ex: Executor,
+    id: string,
+    changes: TaskChanges,
+  ): Promise<TaskRow> {
+    const [row] = await ex
+      .update(tasks)
+      .set({ ...changes, version: sql`${tasks.version} + 1` })
+      .where(eq(tasks.id, id))
+      .returning();
+
+    if (row === undefined) throw new Error('task vanished while locked');
+    return row;
+  }
+
+  /**
+   * Gives every day the task recorded its current title (decision 25), so
+   * the history reads as the task is now called.
+   */
+  async renameLedger(
+    ex: Executor,
+    taskId: string,
+    title: string,
+  ): Promise<void> {
+    await ex
+      .update(taskLedgerEntries)
+      .set({ title })
+      .where(eq(taskLedgerEntries.taskId, taskId));
   }
 
   /** Removes what `day` recorded for the task, if anything. */

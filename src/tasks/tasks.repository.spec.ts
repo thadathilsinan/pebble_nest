@@ -217,6 +217,45 @@ describe('TasksRepository (integration)', () => {
     ).toEqual([{ day: row.date, outcome: 'completed' }]);
   });
 
+  it('edits a task, bumping the version once', async () => {
+    const userId = await newUser();
+    const { row } = await repo.create(t.db, task(userId));
+
+    const edited = await repo.update(t.db, row.id, {
+      title: 'Send the report',
+      reminderDate: '2026-09-25',
+      reminderMin: 540,
+    });
+
+    expect(edited).toMatchObject({
+      title: 'Send the report',
+      notes: '',
+      reminderDate: '2026-09-25',
+      reminderMin: 540,
+      version: 1,
+    });
+  });
+
+  it('renames every day the task recorded, and only that task’s', async () => {
+    const userId = await newUser();
+    const { row } = await repo.create(t.db, task(userId));
+    const { row: other } = await repo.create(t.db, task(userId));
+    await repo.recordIncomplete(t.db, row, '2026-09-22', '2026-09-23');
+    await repo.recordCompleted(t.db, row);
+    await repo.recordCompleted(t.db, other);
+
+    await repo.renameLedger(t.db, row.id, 'Send the report');
+
+    expect((await ledgerOf(row.id)).map((e) => e.title)).toEqual([
+      'Send the report',
+      'Send the report',
+      'Send the report',
+    ]);
+    expect((await ledgerOf(other.id)).map((e) => e.title)).toEqual([
+      'Write the report',
+    ]);
+  });
+
   it('clears one day of a task’s record', async () => {
     const userId = await newUser();
     const { row } = await repo.create(t.db, task(userId));

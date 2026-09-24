@@ -246,7 +246,7 @@ Screen: task slip.
 | Method | Path | Body | Response |
 |---|---|---|---|
 | POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built for one-offs.** See below. |
-| PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` |
+| PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` (200). **Built for one-offs.** See below. |
 | PATCH | `/tasks/{id}/done` | `{ done }` | `Task` (200). **Built.** See below. |
 | POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` |
 | DELETE | `/tasks/{id}` | `?scope=onlyThis\|series` | 204 |
@@ -334,6 +334,29 @@ that has already closed is carried forward right away.
   `401 TOKEN_INVALID`. It does not read the session (decision 16).
 - Missed tasks only come from repeats, so whether one can be ticked is left to
   the task series slice.
+
+**Edit (built, one-offs only):**
+
+- Strict body. `version` is required. `title`, `notes` and `reminderAt` follow
+  create's rules. An absent field is left alone, and `reminderAt: null` clears
+  the reminder. `date` and `blockSeriesId` are `400 VALIDATION_FAILED`: moving
+  a task is `/move`'s job, and done is `/done`'s. An edit never moves or
+  carries a task, not even a task sitting on a closed day.
+- A stale `version` is `409 STALE_VERSION` with the task in `meta.current`.
+  A patch that changes nothing returns 200 and leaves `version` alone. The
+  version check comes before the repeat checks.
+- The repeat fields are accepted because the task slip sends them on every
+  save, and they follow create's rules. A repeat that doesn't fit where the
+  task sits is `422 REPEAT_NOT_ALLOWED`, and one that fits is
+  `501 NOT_IMPLEMENTED`. `repeatWithBlock: false` and
+  `recurrence: {kind: "none"}` change nothing.
+- **A new title renames every ledger entry the task has** (decision 25). This
+  happens in the same transaction, with the task row locked, so two devices
+  editing at the same `version` get one 200 and one 409.
+- An id that isn't a UUID is `400 VALIDATION_FAILED`. An unknown task, or
+  someone else's, is `404 NOT_FOUND`. There is no user read, so a deleted
+  account's token gets 404 too, not the 401 that create and `/done` give. It
+  does not read the session (decision 16).
 
 ## 6. Notifications (NTF)
 
@@ -450,6 +473,7 @@ request turns out to be slow.
 | 22 | Until the day-end job keeps a record of the last day it closed, a day is closed once it is before today in the user's time zone (UTC before the device reports one). Closed-day carry is computed on the write: the task lands on today's general list, and the ledger gets one `incomplete` row per day it passed through, written with `generate_series`, so even a date decades back is one statement. |
 | 23 | `POST /tasks` shipped with one-offs only. A repeat the rules allow answers `501 NOT_IMPLEMENTED`, not `REPEAT_NOT_ALLOWED`, so that code keeps one meaning: the repeat doesn't fit where the task sits. |
 | 24 | `PATCH /tasks/{id}/done` carries no `version` and is last-write-wins, since `done` is an absolute value. The `completed` ledger entry is written on the tick itself, not when the day closes, matching the app. Reopening on a closed day carries the task at once (decision 2). |
+| 25 | Renaming a task renames its ledger entries too, past days included, so the history shows the task's current title. This departs from the app, which keeps the title each entry was written with. `PATCH /tasks/{id}` reads no user row, so a deleted account's token gets 404 there. |
 
 ## 11. Error codes to add
 
