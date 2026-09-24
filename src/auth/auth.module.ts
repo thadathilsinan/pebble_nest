@@ -8,6 +8,8 @@ import { AccessTokensService } from './access-tokens.service';
 import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
+import { GOOGLE_ID_TOKENS } from './google/google-id-tokens';
+import { GoogleJwksVerifier } from './google/google-jwks-verifier';
 import { LogMailer } from './mailer/log-mailer';
 import { MAILER } from './mailer/mailer';
 import { SessionsRepository } from './sessions.repository';
@@ -36,6 +38,13 @@ import { SignInCodesRepository } from './sign-in-codes.repository';
     // `MAILER=log` is the only value env.schema.ts accepts today. A real
     // provider becomes a `useFactory` switching on `env.MAILER`.
     { provide: MAILER, useClass: LogMailer },
+    // One instance for the process, so Google's keys are fetched once and
+    // shared by every request.
+    {
+      provide: GOOGLE_ID_TOKENS,
+      inject: [ENV],
+      useFactory: (env: Env) => new GoogleJwksVerifier(env.GOOGLE_CLIENT_IDS),
+    },
     // Global: every route in the app needs an access token unless it is
     // `@Public()`. Registered here rather than in `AppModule` because it
     // depends on `AccessTokensService`, which lives here.

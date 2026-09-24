@@ -95,7 +95,7 @@ Screens: sign-in, code entry, first run, You.
 |---|---|---|---|---|
 | POST | `/auth/email/code` | `{ email }` | 204 | **Built.** Sends a 6-digit code that expires after 10 minutes. A new code replaces the old one and resets its attempts. Rate-limited per email: one send per 30 seconds and five per hour, otherwise `429 TOO_MANY_REQUESTS` with `meta.retryAfterSeconds`. Answers the same whether or not an account exists. Also used for "Send another code". |
 | POST | `/auth/email/verify` | `{ email, code }` | `Session` (200) | **Built.** Checked in this order: no code on file, or expired, or already used → `410 CODE_EXPIRED`; 5 wrong attempts already → `429 CODE_ATTEMPTS_EXHAUSTED`, even for the right code; wrong code → `400 CODE_INVALID` with `meta.attemptsLeft` (0 on the fifth miss). A code that isn't six digits is `400 VALIDATION_FAILED` and doesn't use up an attempt. |
-| POST | `/auth/google` | `{ idToken }` | `Session` | |
+| POST | `/auth/google` | `{ idToken }` | `Session` (200) | **Built.** See below. |
 | POST | `/auth/apple` | `{ identityToken, authorizationCode, fullName? }` | `Session` | Apple sends the name only on first sign-in, so store it then. Keep the Apple refresh token. Account deletion must revoke it: add the revocation to `MeService.delete` in this slice. |
 | POST | `/auth/refresh` | `{ refreshToken }` | `Session` (200) | **Built.** Rotates the token and slides the session's expiry to 60 days from now. Presenting a token the session has already rotated away from revokes the whole device session, except for a **30-second grace window**: the token retired most recently rotates again, so a retry after a lost response doesn't sign the device out. Unknown, expired, revoked or reused tokens all get `401 TOKEN_INVALID`. `isNewAccount` is always `false`. |
 | POST | `/auth/sign-out` | `{ refreshToken }` | 204 | **Built.** ACC-05. Ends the session the token is current for. Idempotent: an unknown, expired or already-rotated token is also 204. |
@@ -124,6 +124,22 @@ Profile = {
   as the app computes it, so a deleted task's ledger days can set
   `firstRecordedDay` while `hasAnyRecord` is `false`.
 
+- **Google sign-in (built):** `idToken` is the ID token Google Sign-In gives
+  the app. Its shape is checked first: three base64url segments, at most 8 KB,
+  or `400 VALIDATION_FAILED`. With `GOOGLE_CLIENT_IDS` unset the route answers
+  `503 SERVICE_UNAVAILABLE` without checking the token; production refuses to
+  start without it. The token needs an RS256 signature by a key in Google's
+  published set, `iss` of `accounts.google.com` (either spelling), an `aud`
+  that is one of our client IDs, an unexpired `exp`, and `email_verified`;
+  anything else is `401 ID_TOKEN_INVALID`. If Google's keys can't be fetched
+  and none cached fits, it is `503 SERVICE_UNAVAILABLE`. The account is found
+  by the email alone (ACC-03), trimmed and lower-cased, so an account email
+  sign-in opened is the same account; nothing of Google's `sub` is kept.
+  Google's `name`, trimmed and cut to 80 characters, names a new account, and
+  an existing one only while its name is null, bumping `version`; a name the
+  user chose is never replaced. The session's `signInMethod` is `google`.
+  There is no rate limit: every guess costs an attacker a token Google signed
+  (decision 33).
 - **Auth model:** a short-lived access JWT (about 15 minutes) sent as `Bearer`,
   plus a long-lived, rotating, opaque refresh token for each device.
 - **Every route outside `/auth/*` and `/health/*` needs the access token.** A
@@ -669,6 +685,7 @@ request turns out to be slow.
 | 30 | `PATCH /blocks/{seriesId}/occurrences/{date}` checks the series' one `version`, and an `onlyThis` override bumps it, so another device's edit to a different occurrence of the same series gets a 409 and refetches; there is no version per occurrence. Editing the first occurrence with `thisAndFuture` edits the series in place, as the app does. Tasks in occurrences a new rule drops move to their own day's general list (BLK-10) rather than being orphaned as in the app. Moving the first occurrence to a date its rule doesn't land on is `422 BLOCK_NOT_ON_DATE`, not a re-derived rule. `newDate` with `thisAndFuture` past the first occurrence is `400`. A block moved onto a closed day carries its open tasks to today (decision 26). |
 | 31 | `GET /notifications/schedule` builds block alerts from `DaysService.list`, so an alert follows everything the Day screen shows, and reads task reminders by the reminder's own date through a partial index on open tasks. It returns the whole window, times already past included, and leaves dropping those to the phone, so the server needs no notion of "now" here. A midnight tail has no alert. Missed tasks are left out. |
 | 32 | `GET /review` has no range cap, since the UI's custom range reaches back to `firstRecordedDay`. It lays blocks out only from `firstRecordedDay` to today, which leaves the result unchanged, because an occurrence moved on its own becomes a one-off series anchored on its new date. Durations are whole minutes on the wire rather than float hours. `mostCarried` ranks only tasks carried at least once, as the app does. `Profile.firstRecordedDay` and `hasAnyRecord` are real from this slice on, on every `Profile` the API returns. |
+| 33 | `POST /auth/google` links by the verified email only: no identities table, and Google's `sub` isn't stored, so a Google account whose email changes opens a new Pebble account, as an email change would with email sign-in. Google's name fills `users.name` only while it is null. A token Google didn't issue for us, or one with an unverified email, is `401 ID_TOKEN_INVALID`, apart from `TOKEN_INVALID` because the client's next step is to try Google again, not to sign in again; Apple will use it too. `GOOGLE_CLIENT_IDS` is optional outside production, and the route is a 503 without it. Tokens are checked with `jsonwebtoken` against Google's JWKS, fetched with Node's `fetch` and cached for its `max-age`; `jose` 6 is ESM-only and Jest here runs CommonJS. A `kid` the cache lacks refetches at most once in 5 minutes, since the sender chooses the `kid`. |
 
 ## 11. Error codes to add
 
@@ -685,6 +702,7 @@ Append these to `src/core/http/error-code.ts`:
 | `BLOCK_NO_OCCURRENCE` | 422 | A repeating block whose `until` comes before the first day its rule lands on. **Added** (`POST /blocks`, decision 20). |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task or with a block that doesn't repeat, or `recurrence` on a task in a block. **Added** (`POST /tasks`). |
 | `BLOCK_NOT_ON_DATE` | 422 | A task put in a block on a date the block doesn't fall on. **Added** (`POST /tasks`). |
+| `ID_TOKEN_INVALID` | 401 | A Google (later Apple) ID token with a bad signature, another app's audience, the wrong issuer, an expired `exp`, or an unverified email. **Added** (`POST /auth/google`). |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. **Not needed so far:** a create that inserts in one statement never exposes an unfinished original (decision 19). Add it only for a create that holds its insert open inside a longer transaction. |
 
 ## 12. Changes needed in the Flutter app
@@ -709,7 +727,8 @@ These decisions add behaviour the UI doesn't have yet:
 
 - A transactional email provider for sign-in codes. Until then `MAILER=log` writes
   codes to the log, and the service refuses to start with it in production.
-- Google OAuth client IDs for iOS, Android and web.
+- Google OAuth client IDs for iOS, Android and web, set as `GOOGLE_CLIENT_IDS`.
+  Until then `POST /auth/google` answers 503.
 - Apple: Service ID / bundle ID, Team ID, and a Key ID with its private key. These
   are needed for sign-in, the code exchange and token revocation.
 - The day-end job runner, one run per user's local midnight, safe with several

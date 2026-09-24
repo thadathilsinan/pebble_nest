@@ -287,6 +287,24 @@ export const envSchema = z
      * leave every user unable to sign in.
      */
     MAILER: z.enum(['log']).default('log'),
+    /**
+     * The OAuth client IDs whose Google ID tokens `POST /auth/google` accepts,
+     * comma-separated: one each for iOS, Android and web. A token's `aud` must
+     * be one of them, or any app could hand us a token Google issued for it.
+     *
+     * Empty — the default — turns Google sign-in off with a 503, so local
+     * development runs before the IDs exist (api-plan §13). Refused in
+     * production below, where it would leave the Google button broken.
+     */
+    GOOGLE_CLIENT_IDS: z
+      .string()
+      .default('')
+      .transform((raw) =>
+        raw
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean),
+      ),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && env.MAILER === 'log') {
@@ -295,6 +313,15 @@ export const envSchema = z
         path: ['MAILER'],
         message:
           'The log mailer writes sign-in codes to the log and sends no email. Configure a real provider before running in production',
+      });
+    }
+
+    if (env.NODE_ENV === 'production' && env.GOOGLE_CLIENT_IDS.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['GOOGLE_CLIENT_IDS'],
+        message:
+          'Google sign-in accepts no token without its client IDs. Set them before running in production',
       });
     }
   });

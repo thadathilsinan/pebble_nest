@@ -6,6 +6,10 @@ import type { SessionRow, UserRow } from '../core/database/schema';
 import type { UsersRepository } from '../users/users.repository';
 import type { AccessTokensService } from './access-tokens.service';
 import { AuthService } from './auth.service';
+import type {
+  GoogleIdTokenCheck,
+  GoogleIdTokens,
+} from './google/google-id-tokens';
 import type { Mailer } from './mailer/mailer';
 import { hashRefreshToken, hashSignInCode } from './secrets';
 import type { LockedSession, SessionsRepository } from './sessions.repository';
@@ -103,6 +107,8 @@ describe('AuthService', () => {
   let warn: jest.Mock;
   let mailer: Mailer;
   let sendSignInCode: jest.Mock<Promise<void>, [string, string]>;
+  let verifyGoogle: jest.Mock<Promise<GoogleIdTokenCheck>, [string]>;
+  let env: Env;
   let service: AuthService;
 
   beforeEach(() => {
@@ -140,6 +146,13 @@ describe('AuthService', () => {
         .fn()
         .mockResolvedValue({ token: 'jwt', expiresAt: new Date(0) }),
     };
+    verifyGoogle = jest.fn<Promise<GoogleIdTokenCheck>, [string]>();
+    const googleIdTokens: GoogleIdTokens = { verify: verifyGoogle };
+    env = {
+      SIGN_IN_CODE_SECRET: SECRET,
+      REFRESH_TOKEN_TTL_DAYS: 60,
+      GOOGLE_CLIENT_IDS: ['client-1'],
+    } as Env;
     // A transaction that just runs its callback: the fakes do not care which
     // executor they are handed.
     const db = {
@@ -152,8 +165,9 @@ describe('AuthService', () => {
       sessions,
       accessTokens as unknown as AccessTokensService,
       mailer,
+      googleIdTokens,
       db,
-      { SIGN_IN_CODE_SECRET: SECRET, REFRESH_TOKEN_TTL_DAYS: 60 } as Env,
+      env,
       { setContext: jest.fn(), warn } as unknown as PinoLogger,
     );
   });
@@ -269,6 +283,76 @@ describe('AuthService', () => {
       await expect(
         service.verifyCode({ email: EMAIL, code: CODE }),
       ).resolves.toMatchObject({ isNewAccount: true });
+    });
+  });
+
+  describe('signInWithGoogle', () => {
+    const ID_TOKEN = 'header.payload.signature';
+
+    beforeEach(() => {
+      sessions.create.mockImplementation((_, input) =>
+        Promise.resolve({ ...session, signInMethod: input.signInMethod }),
+      );
+    });
+
+    it('signs in the account the verified email names, passing on the name', async () => {
+      verifyGoogle.mockResolvedValue({
+        outcome: 'verified',
+        account: { email: EMAIL, name: 'Ada' },
+      });
+
+      const result = await service.signInWithGoogle({ idToken: ID_TOKEN });
+
+      expect(verifyGoogle).toHaveBeenCalledWith(ID_TOKEN);
+      expect(users.findOrCreateByEmail).toHaveBeenCalledWith({}, EMAIL, 'Ada');
+      expect(sessions.create).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({ userId: user.id, signInMethod: 'google' }),
+      );
+      expect(result).toMatchObject({
+        isNewAccount: false,
+        profile: { id: user.id, signInMethod: 'google' },
+      });
+      expect(result.refreshToken).toMatch(/^[\w-]{43}$/);
+    });
+
+    it('flags a new account so the client shows first run', async () => {
+      verifyGoogle.mockResolvedValue({
+        outcome: 'verified',
+        account: { email: EMAIL, name: null },
+      });
+      users.findOrCreateByEmail.mockResolvedValue({ row: user, created: true });
+
+      await expect(
+        service.signInWithGoogle({ idToken: ID_TOKEN }),
+      ).resolves.toMatchObject({ isNewAccount: true });
+    });
+
+    it('answers ID_TOKEN_INVALID for a token Google did not sign for us', async () => {
+      verifyGoogle.mockResolvedValue({ outcome: 'invalid' });
+
+      await expect(
+        failure(service.signInWithGoogle({ idToken: ID_TOKEN })),
+      ).resolves.toMatchObject({ status: 401, code: 'ID_TOKEN_INVALID' });
+      expect(users.findOrCreateByEmail).not.toHaveBeenCalled();
+    });
+
+    it("answers 503 when Google's keys cannot be fetched", async () => {
+      verifyGoogle.mockResolvedValue({ outcome: 'unavailable' });
+
+      await expect(
+        failure(service.signInWithGoogle({ idToken: ID_TOKEN })),
+      ).resolves.toMatchObject({ status: 503, code: 'SERVICE_UNAVAILABLE' });
+      expect(warn).toHaveBeenCalled();
+    });
+
+    it('answers 503 without checking the token when no client IDs are set', async () => {
+      env.GOOGLE_CLIENT_IDS = [];
+
+      await expect(
+        failure(service.signInWithGoogle({ idToken: ID_TOKEN })),
+      ).resolves.toMatchObject({ status: 503, code: 'SERVICE_UNAVAILABLE' });
+      expect(verifyGoogle).not.toHaveBeenCalled();
     });
   });
 

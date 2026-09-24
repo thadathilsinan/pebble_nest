@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
@@ -20,10 +21,15 @@ import type { ErrorCode } from '../core/http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
 import { AccessTokensService } from './access-tokens.service';
+import type { GoogleSignInBody } from './dto/google-sign-in.dto';
 import type { RefreshSessionBody } from './dto/refresh-session.dto';
 import type { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
 import type { SignOutBody } from './dto/sign-out.dto';
 import type { VerifySignInCodeBody } from './dto/verify-sign-in-code.dto';
+import {
+  GOOGLE_ID_TOKENS,
+  type GoogleIdTokens,
+} from './google/google-id-tokens';
 import { MAILER, type Mailer } from './mailer/mailer';
 import { SessionsRepository } from './sessions.repository';
 import {
@@ -114,6 +120,7 @@ export class AuthService {
     private readonly sessions: SessionsRepository,
     private readonly accessTokens: AccessTokensService,
     @Inject(MAILER) private readonly mailer: Mailer,
+    @Inject(GOOGLE_ID_TOKENS) private readonly googleIdTokens: GoogleIdTokens,
     @Inject(DB) private readonly db: Db,
     @Inject(ENV) private readonly env: Env,
     private readonly logger: PinoLogger,
@@ -220,6 +227,47 @@ export class AuthService {
   }
 
   /**
+   * Signs in with a Google ID token, opening the account if its email has
+   * none (ACC-03). Google's name for the person fills an account that has no
+   * name yet, and never replaces one.
+   *
+   * Off, with a 503, until the client IDs are configured (api-plan §13).
+   */
+  async signInWithGoogle({
+    idToken,
+  }: GoogleSignInBody): Promise<SessionResponse> {
+    if (this.env.GOOGLE_CLIENT_IDS.length === 0) {
+      throw new ServiceUnavailableException({
+        code: 'SERVICE_UNAVAILABLE' satisfies ErrorCode,
+        message: 'Google sign-in is not set up on this server.',
+      });
+    }
+
+    const check = await this.googleIdTokens.verify(idToken);
+
+    switch (check.outcome) {
+      case 'invalid':
+        throw new UnauthorizedException({
+          code: 'ID_TOKEN_INVALID' satisfies ErrorCode,
+          message: 'Google could not confirm this sign-in. Try again.',
+        });
+      case 'unavailable':
+        this.logger.warn("Google's signing keys could not be fetched");
+        throw new ServiceUnavailableException({
+          code: 'SERVICE_UNAVAILABLE' satisfies ErrorCode,
+          message: 'Google sign-in cannot be checked right now. Try again.',
+        });
+    }
+
+    const { email, name } = check.account;
+    const signedIn = await this.db.transaction((tx) =>
+      this.openSession(tx, email, 'google', name),
+    );
+
+    return this.sessionResponse(signedIn, signedIn.created);
+  }
+
+  /**
    * Swaps a refresh token for a new one and a new access token, sliding the
    * session's expiry forward.
    *
@@ -309,17 +357,20 @@ export class AuthService {
   /**
    * Signs `email` in on a new device session, opening the account first if
    * the email has none (ACC-03: the email is the account, whichever method
-   * proved it). Runs inside the caller's transaction, so whatever proved the
-   * email commits with the session or not at all.
+   * proved it). `name` is Google's or Apple's for the person, and names the
+   * account only while it has none. Runs inside the caller's transaction, so
+   * whatever proved the email commits with the session or not at all.
    */
   private async openSession(
     tx: Executor,
     email: string,
     signInMethod: SignInMethod,
+    name: string | null = null,
   ): Promise<SignedIn> {
     const { row: user, created } = await this.users.findOrCreateByEmail(
       tx,
       email,
+      name,
     );
     const refresh = newRefreshToken();
     const session = await this.sessions.create(tx, {

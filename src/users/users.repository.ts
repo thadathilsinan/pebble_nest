@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, or, sql, type SQL } from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
 import {
   blockSeries,
@@ -44,18 +44,34 @@ export class UsersRepository {
    *
    * `email` must already be lower-cased; `ck_users_email_lowercase` rejects
    * anything else rather than opening a second account for `Me@x.com`.
+   *
+   * `name` is what Google or Apple call the person. It names a new account,
+   * and an existing one only while it has no name, bumping `version`; a name
+   * the user chose is never overwritten. `IS NULL` in the update's `WHERE`
+   * makes that hold against a `PATCH /me` racing the sign-in.
    */
   async findOrCreateByEmail(
     ex: Executor,
     email: string,
+    name: string | null = null,
   ): Promise<{ row: UserRow; created: boolean }> {
     const [created] = await ex
       .insert(users)
-      .values({ email })
+      .values({ email, name })
       .onConflictDoNothing({ target: users.email })
       .returning();
 
     if (created !== undefined) return { row: created, created: true };
+
+    if (name !== null) {
+      const [named] = await ex
+        .update(users)
+        .set({ name, version: sql`${users.version} + 1` })
+        .where(and(eq(users.email, email), isNull(users.name)))
+        .returning();
+
+      if (named !== undefined) return { row: named, created: false };
+    }
 
     const [existing] = await ex
       .select()

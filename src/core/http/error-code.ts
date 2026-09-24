@@ -39,6 +39,11 @@ export type ErrorCode =
   // A refresh token that is unknown, expired, revoked or reused. One code for
   // all of them: the client does the same thing for each — sign in again.
   | 'TOKEN_INVALID'
+  // A Google or Apple ID token that doesn't prove an email: a bad signature,
+  // another app's audience, expired, or an unverified email. Apart from
+  // TOKEN_INVALID because the client's next step differs: try the provider
+  // again, not sign in again.
+  | 'ID_TOKEN_INVALID'
   // A PATCH carried a `version` someone else has already moved past. The
   // current resource travels in `error.meta.current`, so the client can
   // re-apply its edit and retry in one round trip.

@@ -41,6 +41,42 @@ describe('UsersRepository (integration)', () => {
     expect(second.row.id).toBe(first.row.id);
   });
 
+  describe('with a name from Google or Apple', () => {
+    it('names a new account at version 0', async () => {
+      const { row, created } = await repo.findOrCreateByEmail(
+        t.db,
+        'new@example.com',
+        'Ada',
+      );
+
+      expect(created).toBe(true);
+      expect(row).toMatchObject({ name: 'Ada', version: 0 });
+    });
+
+    it('names an existing account that has none, bumping the version', async () => {
+      const first = await repo.findOrCreateByEmail(t.db, 'me@example.com');
+      const { row, created } = await repo.findOrCreateByEmail(
+        t.db,
+        'me@example.com',
+        'Ada',
+      );
+
+      expect(created).toBe(false);
+      expect(row).toMatchObject({ id: first.row.id, name: 'Ada', version: 1 });
+    });
+
+    it('never overwrites a name the account already has', async () => {
+      await repo.findOrCreateByEmail(t.db, 'me@example.com', 'Chosen');
+      const { row } = await repo.findOrCreateByEmail(
+        t.db,
+        'me@example.com',
+        'From Google',
+      );
+
+      expect(row).toMatchObject({ name: 'Chosen', version: 0 });
+    });
+  });
+
   it('opens exactly one account when two sign-ins race', async () => {
     const results = await Promise.all([
       t.db.transaction((tx) =>
