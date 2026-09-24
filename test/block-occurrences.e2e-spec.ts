@@ -1130,27 +1130,229 @@ describe('Editing, skipping and deleting a block occurrence (e2e)', () => {
       }
     });
 
-    it('answers 501 for splitting a series or moving one occurrence, for now', async () => {
+    it('with thisAndFuture on a later occurrence, splits the series there', async () => {
       const seriesId = await postBlock({
         date: future,
         recurrence: { kind: 'daily' },
       });
       const next = addDays(future, 1);
+      const before = await createTask({
+        title: 'Before',
+        date: future,
+        blockSeriesId: seriesId,
+      });
+      await skip(seriesId, addDays(future, 2)).expect(200);
+      const after = await createTask({
+        title: 'After',
+        date: addDays(future, 2),
+        blockSeriesId: seriesId,
+      });
 
-      for (const res of [
-        await patch(seriesId, next, {
-          version: 0,
-          scope: 'thisAndFuture',
-          name: 'Later',
-        }),
-        await patch(seriesId, next, {
-          version: 0,
-          scope: 'onlyThis',
-          newDate: addDays(next, 1),
-        }),
-      ]) {
-        expect(res.status).toBe(501);
-      }
+      const res = await patch(seriesId, next, {
+        version: 0,
+        scope: 'thisAndFuture',
+        name: 'Later',
+        startMin: 600,
+        endMin: 660,
+      }).expect(200);
+
+      const split = occurrenceOf(res);
+      expect(split).toMatchObject({
+        seriesVersion: 0,
+        date: next,
+        name: 'Later',
+        startMin: 600,
+        recurrence: { kind: 'daily', until: null },
+      });
+      expect(split.seriesId).not.toBe(seriesId);
+      expect(await seriesRow(seriesId)).toEqual({ until: future, version: 1 });
+      expect(await listed(seriesId, future)).toMatchObject({
+        name: 'Deep work',
+        tasks: [expect.objectContaining({ id: before.id, version: 0 })],
+      });
+      expect(await listed(split.seriesId, next)).toEqual(split);
+      // Its skip and its tasks go to the new series.
+      expect(await listed(split.seriesId, addDays(future, 2))).toMatchObject({
+        name: 'Later',
+        skipped: true,
+        tasks: [
+          expect.objectContaining({ id: after.id, version: after.version + 1 }),
+        ],
+      });
+      expect(
+        await occurrenceDates(seriesId, future, addDays(future, 3)),
+      ).toEqual([future]);
+    });
+
+    it('splitting with a new rule sends tasks in dropped occurrences to the general list', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const next = addDays(future, 1);
+      const weekday = new Date(`${next}T00:00:00Z`).getUTCDay() || 7;
+      const dropped = await createTask({
+        title: 'Dropped',
+        date: addDays(next, 1),
+        blockSeriesId: seriesId,
+      });
+      const kept = await createTask({
+        title: 'Kept',
+        date: addDays(next, 7),
+        blockSeriesId: seriesId,
+      });
+
+      const res = await patch(seriesId, next, {
+        version: 0,
+        scope: 'thisAndFuture',
+        recurrence: { kind: 'weekly' },
+      }).expect(200);
+
+      const split = occurrenceOf(res);
+      expect(split.recurrence).toMatchObject({
+        kind: 'weekly',
+        weekdays: [weekday],
+      });
+      expect((await getDay(addDays(next, 1))).generalList).toEqual([
+        expect.objectContaining({ id: dropped.id, blockSeriesId: null }),
+      ]);
+      expect((await listed(split.seriesId, addDays(next, 7)))?.tasks).toEqual([
+        expect.objectContaining({ id: kept.id }),
+      ]);
+    });
+
+    it('splitting at a past date relinks its open tasks without carrying them', async () => {
+      const today = todayIn('UTC');
+      const start = addDays(today, -3);
+      const seriesId = await postBlock({
+        date: start,
+        recurrence: { kind: 'daily' },
+      });
+      const task = await createTask({
+        title: 'A',
+        date: today,
+        blockSeriesId: seriesId,
+      });
+      await pool.query('UPDATE tasks SET date = $1', [addDays(today, -1)]);
+
+      const res = await patch(seriesId, addDays(today, -2), {
+        version: 0,
+        scope: 'thisAndFuture',
+        alert: true,
+      }).expect(200);
+
+      const split = occurrenceOf(res);
+      expect((await listed(split.seriesId, addDays(today, -1)))?.tasks).toEqual(
+        [
+          expect.objectContaining({
+            id: task.id,
+            carryCount: 0,
+            date: addDays(today, -1),
+          }),
+        ],
+      );
+      expect(await ledger()).toEqual([]);
+    });
+
+    it('does not split for a patch that changes nothing', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+
+      const res = await patch(seriesId, addDays(future, 1), {
+        version: 0,
+        scope: 'thisAndFuture',
+        name: 'Deep work',
+        recurrence: { kind: 'daily' },
+      }).expect(200);
+
+      expect(occurrenceOf(res)).toMatchObject({ seriesId, seriesVersion: 0 });
+      expect(await seriesRow(seriesId)).toEqual({ until: null, version: 0 });
+    });
+
+    it('with onlyThis and newDate, moves one occurrence to a one-off block with its tasks', async () => {
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const next = addDays(future, 1);
+      const later = addDays(future, 5);
+      await patch(seriesId, next, {
+        version: 0,
+        scope: 'onlyThis',
+        name: 'Gym',
+      }).expect(200);
+      const open = await createTask({
+        title: 'Open',
+        date: next,
+        blockSeriesId: seriesId,
+      });
+      const done = await createTask({
+        title: 'Done',
+        date: next,
+        blockSeriesId: seriesId,
+      });
+      await setDone(done.id);
+
+      const res = await patch(seriesId, next, {
+        version: 1,
+        newDate: later,
+        startMin: 600,
+        endMin: 660,
+      }).expect(200);
+
+      const moved = occurrenceOf(res);
+      expect(moved).toMatchObject({
+        seriesVersion: 0,
+        date: later,
+        name: 'Gym',
+        startMin: 600,
+        endMin: 660,
+        recurrence: { kind: 'none' },
+        totalCount: 2,
+      });
+      expect(moved.seriesId).not.toBe(seriesId);
+      expect(await listed(moved.seriesId, later)).toEqual(moved);
+      expect(await listed(seriesId, later)).toMatchObject({
+        name: 'Deep work',
+      });
+      expect(
+        await occurrenceDates(seriesId, future, addDays(future, 2)),
+      ).toEqual([future, addDays(future, 2)]);
+      expect(await seriesRow(seriesId)).toEqual({ until: null, version: 2 });
+      expect(moved.tasks.map((t) => t.id).sort()).toEqual(
+        [open.id, done.id].sort(),
+      );
+      expect(await ledger()).toEqual([{ day: later, outcome: 'completed' }]);
+      expect(
+        codeOf(await patch(seriesId, next, { version: 2, name: 'X' })),
+      ).toBe('NOT_FOUND');
+    });
+
+    it('moving one occurrence onto a closed day carries its open tasks to today', async () => {
+      await setTimeZone(AHEAD);
+      const today = todayIn(AHEAD);
+      const past = addDays(today, -2);
+      const seriesId = await postBlock({
+        date: future,
+        recurrence: { kind: 'daily' },
+      });
+      const open = await createTask({
+        title: 'Open',
+        date: future,
+        blockSeriesId: seriesId,
+      });
+
+      const res = await patch(seriesId, future, {
+        version: 0,
+        newDate: past,
+      }).expect(200);
+
+      expect(occurrenceOf(res)).toMatchObject({ date: past, tasks: [] });
+      expect((await getDay(today)).generalList).toEqual([
+        expect.objectContaining({ id: open.id, carryCount: 2 }),
+      ]);
     });
 
     it('answers 404 for an unknown series, someone else’s, or a deleted occurrence', async () => {

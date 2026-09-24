@@ -183,7 +183,7 @@ Screens: block slip, block sheet.
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | POST | `/blocks` | `{ name, date, startMin, endMin, recurrence?, alert, idempotencyKey? }` | `BlockOccurrence` (201). **Built.** See below. |
-| PATCH | `/blocks/{seriesId}/occurrences/{date}` | `{ version, scope?, name?, startMin?, endMin?, newDate?, recurrence?, alert? }` | `BlockOccurrence` (200). **Built, except splitting a series and moving one occurrence.** See below. |
+| PATCH | `/blocks/{seriesId}/occurrences/{date}` | `{ version, scope?, name?, startMin?, endMin?, newDate?, recurrence?, alert? }` | `BlockOccurrence` (200). **Built.** See below. |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}` | `?scope=onlyThis\|series` | `{ movedTaskCount }` (200). **Built.** See below. |
 | POST | `/blocks/{seriesId}/occurrences/{date}/skip` | — | `{ movedTaskCount }` (200). **Built.** See below. |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}/skip` | — | 204. **Built.** See below. |
@@ -212,8 +212,7 @@ Screens: block slip, block sheet.
 - **Edit scope** is `onlyThis` or `thisAndFuture`, and is ignored for a
   non-repeating block. `recurrence` is accepted only with `thisAndFuture`. Past
   occurrences never change.
-- **Edit (built in place and for `onlyThis`; the rest answers
-  `501 NOT_IMPLEMENTED` for now):** the body is strict, `version` is the
+- **Edit (built):** the body is strict, `version` is the
   series' `seriesVersion` and required, and `scope` defaults to `onlyThis`.
   `name`, `startMin`, `endMin` and `recurrence` follow create's rules; an
   absent field is left alone, and `newDate` equal to `date` is no move.
@@ -250,6 +249,21 @@ Screens: block slip, block sheet.
     shows the overrides, on the midnight tail too, and whether there is a
     tail follows the occurrence's own times. The trace is the one for the
     occurrence's name. `GET /block-names` counts series names only.
+  - **`onlyThis` with `newDate`** moves the occurrence out as a one-off
+    block with a new `seriesId`: its own values, overrides included, with
+    the patch applied. The occurrence is deleted from its series, bumping
+    `seriesVersion`, so naming it again is `404`. Its tasks, open and done,
+    go with it, as an in-place move takes them. A skip stays behind.
+  - **`thisAndFuture` on a later occurrence** splits the series: it ends
+    the day before, bumping `seriesVersion`, and a new series with a new
+    `seriesId` starts on `date`, taking the series' own values with the
+    patch applied, and `recurrence` if sent (anchored on `date`). Earlier
+    occurrences never change. Occurrences from `date` on take their skips
+    and overrides to the new series. Their tasks are relinked in place,
+    without a carry, except those in occurrences the new rule doesn't have,
+    which go to their day's general list. The answer is the new series'
+    first occurrence. A patch that changes nothing doesn't split.
+    Tasks that repeat with the block follow when task series exist.
 - **Moving a block:** its tasks go with it (BLK-09). Moving one occurrence of a
   repeating block to another date makes it a one-off block, and its tasks become
   one-offs.

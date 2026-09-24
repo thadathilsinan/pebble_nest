@@ -129,6 +129,27 @@ export class BlockOccurrencesRepository {
   }
 
   /**
+   * Gives the exception rows of `fromSeries`' occurrences starting on or
+   * after `from` to `toSeries`, for a series split there.
+   */
+  async moveSeries(
+    ex: Executor,
+    fromSeries: string,
+    toSeries: string,
+    from: string,
+  ): Promise<void> {
+    await ex
+      .update(blockOccurrenceExceptions)
+      .set({ blockSeriesId: toSeries })
+      .where(
+        and(
+          eq(blockOccurrenceExceptions.blockSeriesId, fromSeries),
+          gte(blockOccurrenceExceptions.date, from),
+        ),
+      );
+  }
+
+  /**
    * Moves the exception row of the occurrence starting on `from` to `to`,
    * for an occurrence moved there. An occurrence already on `to` keeps its
    * own row, and `from`'s stays where it was.

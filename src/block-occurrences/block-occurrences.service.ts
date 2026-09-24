@@ -3,7 +3,6 @@ import {
   ConflictException,
   Inject,
   Injectable,
-  NotImplementedException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
@@ -68,7 +67,9 @@ export class BlockOccurrencesService {
    * Edits the occurrence starting on `date` (`docs/api-plan.md` §4). A
    * block that doesn't repeat, or a series' first occurrence edited with
    * `thisAndFuture`, is the series itself, so the series is edited in place.
-   * `onlyThis` on a repeating block overrides that occurrence alone.
+   * A later occurrence with `thisAndFuture` splits the series there.
+   * `onlyThis` on a repeating block overrides that occurrence alone, or with
+   * `newDate` moves it out as a one-off block.
    *
    * A stale `version` is a 409 carrying the occurrence as it is, checked
    * before which fields the scope accepts, since those depend on whether the
@@ -116,13 +117,15 @@ export class BlockOccurrencesService {
         if (body.recurrence !== undefined) {
           throw invalid('Only this and all future ones can change the repeat.');
         }
-        if (newDate !== undefined) throw editsNotYet();
+        if (newDate !== undefined) {
+          return this.moveOne(tx, found, date, { ...body, newDate }, today);
+        }
         return this.override(tx, found, date, body);
       }
       if (newDate !== undefined) {
         throw invalid('Only this occurrence, or the first, can move.');
       }
-      throw editsNotYet();
+      return this.split(tx, found, date, body, today);
     });
   }
 
@@ -321,6 +324,132 @@ export class BlockOccurrencesService {
   }
 
   /**
+   * Splits a repeating series at a later occurrence (REC-04): the series
+   * ends the day before, and a new one, with the patch applied to the
+   * series' own values, starts on `date`. Earlier occurrences never change.
+   *
+   * The occurrences from `date` on take their exception rows and tasks to
+   * the new series. A task whose day the new rule doesn't land on goes to
+   * its day's general list instead, as a deleted occurrence's does; the
+   * rest are relinked where they are, without a carry. The answer is the
+   * new series' first occurrence, as `POST /blocks` answers.
+   */
+  private async split(
+    tx: Executor,
+    { series, exception }: FoundOccurrence,
+    date: string,
+    body: UpdateOccurrenceBody,
+    today: string,
+  ): Promise<BlockOccurrence> {
+    const recurrence =
+      body.recurrence === undefined
+        ? recurrenceOf(series)
+        : resolveRecurrence(body.recurrence, date);
+    if (recurrence.until !== null && recurrence.until < date) {
+      throw invalid('The repeat cannot end before the block starts.');
+    }
+    const shape = patched(shapeOf(series), body);
+    assertLongEnough(shape);
+    const first = firstOccurrenceFrom(recurrence, date, date);
+    if (first === null) throw noOccurrence();
+    if (
+      sameShape(shape, shapeOf(series)) &&
+      sameRecurrence(recurrence, recurrenceOf(series))
+    ) {
+      return this.occurrence(tx, series, date, exception);
+    }
+
+    await this.blocks.endBy(tx, series.id, addDays(date, -1));
+    const { row: next } = await this.blocks.create(tx, {
+      userId: series.userId,
+      ...shape,
+      anchorDate: date,
+      recurrenceKind: recurrence.kind,
+      weekdays: recurrence.weekdays,
+      monthDays: recurrence.monthDays,
+      until: recurrence.until,
+    });
+    await this.occurrences.moveSeries(tx, series.id, next.id, date);
+
+    const tasks = await this.tasks.findInSeriesForUpdate(
+      tx,
+      series.userId,
+      series.id,
+      { date, from: date },
+    );
+    for (const task of tasks) {
+      if (occursOn(recurrence, date, task.date)) {
+        await this.tasks.move(tx, task.id, {
+          date: task.date,
+          blockSeriesId: next.id,
+          carryDays: 0,
+        });
+      } else {
+        await this.place(
+          tx,
+          task,
+          { date: task.date, blockSeriesId: null },
+          today,
+        );
+      }
+    }
+
+    return this.occurrence(
+      tx,
+      next,
+      first,
+      await this.occurrences.find(tx, next.id, first),
+    );
+  }
+
+  /**
+   * Moves one occurrence of a repeating series to `newDate`, as a one-off
+   * block with the occurrence's own values and the patch applied (BLK-09).
+   * The occurrence is deleted from its series, which bumps the series'
+   * `version`, and its tasks, open and done, go to the new block. An open
+   * one landing on a closed day carries on to today, as `/move` carries it.
+   */
+  private async moveOne(
+    tx: Executor,
+    { series, exception }: FoundOccurrence,
+    date: string,
+    body: UpdateOccurrenceBody & { newDate: string },
+    today: string,
+  ): Promise<BlockOccurrence> {
+    const shape = patched(shapeOf(series, exception), body);
+    assertLongEnough(shape);
+
+    await this.occurrences.markDeleted(tx, series.userId, series.id, date);
+    await this.blocks.update(tx, series.id);
+    const { row: moved } = await this.blocks.create(tx, {
+      userId: series.userId,
+      ...shape,
+      anchorDate: body.newDate,
+      recurrenceKind: 'none',
+      weekdays: [],
+      monthDays: [],
+      until: null,
+    });
+
+    const tasks = await this.tasks.findInSeriesForUpdate(
+      tx,
+      series.userId,
+      series.id,
+      { date },
+    );
+    for (const task of tasks) {
+      await this.place(
+        tx,
+        task,
+        { date: body.newDate, blockSeriesId: moved.id },
+        today,
+      );
+    }
+
+    return this.occurrence(tx, moved, body.newDate, null);
+  }
+
+  /**
    * Overrides one occurrence of a repeating series with the patch. Each
    * override matching the series is stored as null, so it follows later
    * changes to the series. A real change bumps the series' `version`.
@@ -498,14 +627,6 @@ function invalid(message: string): BadRequestException {
   return new BadRequestException({
     code: 'VALIDATION_FAILED' satisfies ErrorCode,
     message,
-  });
-}
-
-/** Splitting a series and moving one occurrence ship in the next commit. */
-function editsNotYet(): NotImplementedException {
-  return new NotImplementedException({
-    code: 'NOT_IMPLEMENTED' satisfies ErrorCode,
-    message: 'This edit is not available yet.',
   });
 }
 
