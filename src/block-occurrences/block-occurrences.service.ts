@@ -37,6 +37,7 @@ import {
 import { DB, type Db, type Executor } from '../core/database/database.module';
 import type { BlockSeriesRow, TaskRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
+import { TaskSeriesService } from '../tasks/task-series.service';
 import { compareTasks, toTask } from '../tasks/tasks.mapper';
 import { TasksRepository } from '../tasks/tasks.repository';
 import { todayFor } from '../users/today';
@@ -61,6 +62,7 @@ export class BlockOccurrencesService {
     private readonly tasks: TasksRepository,
     private readonly users: UsersRepository,
     private readonly names: BlockNamesRepository,
+    private readonly taskSeries: TaskSeriesService,
   ) {}
 
   /**
@@ -214,13 +216,27 @@ export class BlockOccurrencesService {
       const { series } = found;
       const repeats = series.recurrenceKind !== 'none';
       const wholeSeries = scope === 'series' && repeats;
+      const reach = { date, from: wholeSeries ? today : undefined };
 
-      const tasks = await this.tasks.findInSeriesForUpdate(
+      let tasks = await this.tasks.findInSeriesForUpdate(
         tx,
         caller.userId,
         seriesId,
-        { date, from: wholeSeries ? today : undefined },
+        reach,
       );
+      if (wholeSeries) {
+        // Tasks repeating with it stop too, and their copies from today on,
+        // which existed only because the series did, go (decision 37).
+        // After the tasks' locks, as a task edit takes its series' after
+        // its own.
+        await this.taskSeries.endWithBlock(tx, seriesId, addDays(today, -1));
+        tasks = await this.tasks.findInSeriesForUpdate(
+          tx,
+          caller.userId,
+          seriesId,
+          reach,
+        );
+      }
       // Before the series goes, since its foreign key would only unset the
       // tasks' block, without a version bump or a carry.
       const movedTaskCount = await this.toGeneralList(tx, tasks, today);
@@ -302,6 +318,7 @@ export class BlockOccurrencesService {
             task,
             { date: newDate, blockSeriesId: series.id },
             today,
+            { splitOff: false },
           );
         } else if (!occursOn(recurrence, anchorDate, task.date)) {
           await this.place(
@@ -311,6 +328,13 @@ export class BlockOccurrencesService {
             today,
           );
         }
+      }
+      if (newDate !== undefined) {
+        await this.taskSeries.followHeadMove(tx, series.id, date, newDate);
+      }
+      // A block that stops repeating takes its tasks' repeats with it.
+      if (recurrence.kind === 'none') {
+        await this.taskSeries.endWithBlock(tx, series.id, null);
       }
     }
 
@@ -393,6 +417,13 @@ export class BlockOccurrencesService {
         );
       }
     }
+    await this.taskSeries.followSplit(
+      tx,
+      series.id,
+      next.id,
+      date,
+      recurrence.kind !== 'none',
+    );
 
     return this.occurrence(
       tx,
@@ -493,6 +524,15 @@ export class BlockOccurrencesService {
     date: string,
     exception: OccurrenceException | null,
   ): Promise<BlockOccurrence> {
+    // Its tasks repeating with it, and any repeating on their own that day,
+    // are issued as it is read, as `GET /days` issues them.
+    await this.taskSeries.issueBetween(
+      ex,
+      series.userId,
+      date,
+      date,
+      (blockSeriesId, day) => blockSeriesId === series.id && day === date,
+    );
     const [taskRows, traces] = await Promise.all([
       this.tasks.findBetween(ex, series.userId, date, date),
       this.names.findTraces(ex, series.userId, [
@@ -535,17 +575,23 @@ export class BlockOccurrencesService {
    * closed carries on to today's general list instead, with one carry and
    * one `incomplete` entry per closed day, as `/move` carries one
    * (decision 26).
+   *
+   * An occurrence of a repeating task splits off as a one-off, as the app
+   * detaches a task its block no longer holds, unless `splitOff` is false:
+   * a series' first occurrence moving with its tasks keeps them.
    */
   private async place(
     tx: Executor,
     task: TaskRow,
     to: { date: string; blockSeriesId: string | null },
     today: string,
+    { splitOff = true }: { splitOff?: boolean } = {},
   ): Promise<void> {
     if (task.done || to.date >= today) {
       const moved = await this.tasks.move(tx, task.id, {
         ...to,
         carryDays: 0,
+        splitOff,
       });
       if (task.done && to.date !== task.date) {
         await this.tasks.clearDay(tx, task.id, task.date);
@@ -557,6 +603,7 @@ export class BlockOccurrencesService {
       date: today,
       blockSeriesId: null,
       carryDays: daysBetween(to.date, today),
+      splitOff,
     });
     await this.tasks.recordIncomplete(tx, carried, to.date, addDays(today, -1));
   }

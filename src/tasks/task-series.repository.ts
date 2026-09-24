@@ -1,5 +1,16 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  or,
+  sql,
+} from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
 import {
   taskSeries,
@@ -103,6 +114,67 @@ export class TaskSeriesRepository {
   }
 
   /**
+   * The series repeating with the block, locked until the transaction ends,
+   * in id order. Uses `idx_task_series_block_series_id`.
+   */
+  findOnBlockForUpdate(
+    ex: Executor,
+    blockSeriesId: string,
+  ): Promise<TaskSeriesRow[]> {
+    return ex
+      .select()
+      .from(taskSeries)
+      .where(eq(taskSeries.blockSeriesId, blockSeriesId))
+      .orderBy(taskSeries.id)
+      .for('update');
+  }
+
+  /** Moves the whole series to another block. */
+  async repoint(
+    ex: Executor,
+    id: string,
+    blockSeriesId: string,
+  ): Promise<void> {
+    await ex
+      .update(taskSeries)
+      .set({ blockSeriesId })
+      .where(eq(taskSeries.id, id));
+  }
+
+  /**
+   * Re-anchors the series on `anchorDate`, marking it issued, as its
+   * block's first occurrence moves there with its tasks.
+   */
+  async reanchor(ex: Executor, id: string, anchorDate: string): Promise<void> {
+    await ex
+      .update(taskSeries)
+      .set({ anchorDate })
+      .where(eq(taskSeries.id, id));
+    await ex
+      .insert(taskSeriesIssuedDates)
+      .values({ taskSeriesId: id, date: anchorDate })
+      .onConflictDoNothing();
+  }
+
+  /** The dates the series has issued from `from` on. */
+  async findIssuedFrom(
+    ex: Executor,
+    id: string,
+    from: string,
+  ): Promise<string[]> {
+    const rows = await ex
+      .select({ date: taskSeriesIssuedDates.date })
+      .from(taskSeriesIssuedDates)
+      .where(
+        and(
+          eq(taskSeriesIssuedDates.taskSeriesId, id),
+          gte(taskSeriesIssuedDates.date, from),
+        ),
+      );
+    return rows.map((row) => row.date);
+  }
+
+  /**
    * Deletes the series and the dates it issued. Its remaining tasks become
    * one-offs.
    */
@@ -145,6 +217,22 @@ export class TaskSeriesRepository {
           lte(taskSeries.anchorDate, to),
           or(isNull(taskSeries.endedOn), gte(taskSeries.endedOn, from)),
           or(isNull(taskSeries.until), gte(taskSeries.until, from)),
+        ),
+      );
+  }
+
+  /**
+   * The user's series with a reminder that are still issuing, for NTF-03.
+   * Uses `idx_task_series_user_id`.
+   */
+  findWithReminders(ex: Executor, userId: string): Promise<TaskSeriesRow[]> {
+    return ex
+      .select()
+      .from(taskSeries)
+      .where(
+        and(
+          eq(taskSeries.userId, userId),
+          isNotNull(taskSeries.reminderDayOffset),
         ),
       );
   }

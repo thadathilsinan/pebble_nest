@@ -304,7 +304,8 @@ Screens: block slip, block sheet.
     without a carry, except those in occurrences the new rule doesn't have,
     which go to their day's general list. The answer is the new series'
     first occurrence. A patch that changes nothing doesn't split.
-    Tasks that repeat with the block follow when task series exist.
+    Tasks repeating with the block carry on with the new series from `date`
+    (decision 37).
 - **Moving a block:** its tasks go with it (BLK-09). Moving one occurrence of a
   repeating block to another date makes it a one-off block, and its tasks become
   one-offs.
@@ -338,8 +339,10 @@ Screens: block slip, block sheet.
   `404 NOT_FOUND`. A `series` retry naming today or later gets
   `422 BLOCK_NOT_ON_DATE` instead, since the series now ends before it. A
   deleted account's token gets `401 TOKEN_INVALID`, because delete reads the
-  user's time zone. It does not read the session (decision 16). Removing task
-  copies that repeat with the block waits for the task series slice.
+  user's time zone. It does not read the session (decision 16). With
+  `series`, tasks repeating with the block stop too: their open copies dated
+  today or later are deleted before the move, done ones move as one-offs,
+  and every task a delete moves splits off from its series (decision 37).
 - **Skip:** open tasks move to the general list, and repeating ones split off as
   one-offs (BLK-07). Un-skipping restores the status; tasks already moved stay
   where they are (BLK-08).
@@ -608,7 +611,10 @@ is never sent to the server.
 - Times already past today are included; the phone drops them when it
   schedules. A task carried forward keeps its old `reminderAt`, so a reminder
   on a past date is not scheduled again.
-- Repeating task reminders (NTF-03) arrive with the task series slice.
+- **Repeating task reminders** (NTF-03): before the reminders are read, each
+  series with a reminder issues the occurrences whose reminder falls in the
+  range, even when the occurrence's own date doesn't (a reminder the evening
+  before), so every reminder is a real task with an id (decision 37).
 - It reads neither the session (decision 16) nor the user row, so a deleted
   account's token gets empty lists, as with `GET /days`.
 
@@ -743,6 +749,7 @@ request turns out to be slow.
 | 34 | `POST /auth/apple` links by the verified email only, as Google does (decision 33), and shares its verifier (`src/auth/id-tokens/`). The authorization code must be exchanged for a sign-in to succeed, so every Apple account has a refresh token to revoke. That token is stored as Apple sent it in `apple_grants`, not encrypted: revoking needs the token itself, and without our Apple private key it can only revoke the grant or mint Apple ID tokens for our app. `DELETE /me` revokes it after the delete commits, and the answer doesn't depend on the revoke: a failed revoke is logged, and the account stays deleted, so deletion never depends on Apple being up. iOS only: no Services ID, so no web or Android flow and no `redirect_uri`. No `nonce` check, as with Google. Apple's server-to-server notifications (a user revoking the app from their Apple ID settings) are not handled. The four `APPLE_` settings are all-or-none, the private key is checked to be a P-256 PEM at boot, and production refuses to start without them. |
 | 35 | Task series live in `task_series`, with each occurrence a row in `tasks` (`task_series_id`). Occurrences are **issued as their dates are read**: `GET /days` writes any occurrence in its range not yet issued, closed days included, before reading the tasks. `task_series_issued_dates` holds one row per series and date, and its key makes issuing idempotent and race-safe (one `INSERT … ON CONFLICT DO NOTHING` feeding the task insert), so an occurrence that is moved, split off or deleted never comes back. A closed day's issued occurrence stays open for the day-end job to settle. A repeating task created on a closed day is settled itself (carried, or missed by REC-06: on the day before its series' next occurrence), but its series' other closed-day occurrences are not issued and settled on the spot as the app does; they appear open when those days are read. A series in a block lands on the block's occurrences that aren't deleted, skipped ones included, as in the app. Reopening a missed task leaves it missed. |
 | 36 | Editing an occurrence of a repeating task follows the app: title and reminder reach the series and its later **open** occurrences, notes reach every occurrence, and turning the repeat off stops the series at this occurrence and deletes its later open copies, keeping done ones as one-offs. A changed own rule ends the old series here and starts a new one from this occurrence, with the done later copies' dates marked issued so they aren't doubled. `/move` splits an occurrence off as a one-off. `DELETE ?scope=series` deletes the named occurrence and every one from today on, and ends the series yesterday, or deletes it if it began today or later. The task row is locked before its series row. `PATCH` with the `Recurrence` exactly as it came back (`monthDays: []` on a weekly one) is still `400`, as for blocks. |
+| 37 | Tasks repeating with a block follow it, as in the app. A split ends each such series the day before and starts a copy on the new block from the split date, knowing the dates it already issued; one begun on or after that date moves across whole. A head move re-anchors the series anchored there. A block that stops repeating deletes its task series, making their tasks one-offs. Deleting a block from today on ends its task series yesterday and deletes their open copies from today on. Every task that skip, delete, a dropped occurrence or a move-one moves splits off as a one-off. An occurrence a block edit returns has its tasks issued first. `/notifications/schedule` issues each series over the dates its reminders in the window belong to. The block series is locked, then its tasks, then their task series, matching the task routes' task-then-series order. |
 
 ## 11. Error codes to add
 

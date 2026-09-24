@@ -501,6 +501,22 @@ export class TasksRepository {
       );
   }
 
+  /**
+   * Makes the series' occurrences dated `from` or later occurrences of
+   * `toSeriesId` instead, where they are, when their block splits.
+   */
+  async relinkSeriesFrom(
+    ex: Executor,
+    taskSeriesId: string,
+    from: string,
+    toSeriesId: string,
+  ): Promise<void> {
+    await ex
+      .update(tasks)
+      .set({ taskSeriesId: toSeriesId })
+      .where(and(eq(tasks.taskSeriesId, taskSeriesId), gte(tasks.date, from)));
+  }
+
   /** Removes what `day` recorded for the task, if anything. */
   async clearDay(ex: Executor, taskId: string, day: string): Promise<void> {
     await ex

@@ -207,6 +207,34 @@ export class BlocksRepository {
   }
 
   /**
+   * The user's deleted occurrences starting from `from` to `to`, both
+   * included, as `seriesId/date` keys. Uses
+   * `idx_block_occurrence_exceptions_user_id_date`.
+   */
+  async findDeletedBetween(
+    ex: Executor,
+    userId: string,
+    from: string,
+    to: string,
+  ): Promise<Set<string>> {
+    const rows = await ex
+      .select({
+        blockSeriesId: blockOccurrenceExceptions.blockSeriesId,
+        date: blockOccurrenceExceptions.date,
+      })
+      .from(blockOccurrenceExceptions)
+      .where(
+        and(
+          eq(blockOccurrenceExceptions.userId, userId),
+          gte(blockOccurrenceExceptions.date, from),
+          lte(blockOccurrenceExceptions.date, to),
+          eq(blockOccurrenceExceptions.deleted, true),
+        ),
+      );
+    return new Set(rows.map((row) => `${row.blockSeriesId}/${row.date}`));
+  }
+
+  /**
    * The user's series that may have an occurrence starting between `from` and
    * `to`, both inclusive: begun by `to`, and not ended before `from`. Which
    * days in the range each one lands on is `occursOn`'s job, not SQL's.

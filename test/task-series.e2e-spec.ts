@@ -180,6 +180,35 @@ describe('Repeating tasks (e2e)', () => {
     return (res.body as { data: Task }).data;
   }
 
+  function occurrenceUrl(seriesId: string, date: string) {
+    return `/api/v1/blocks/${seriesId}/occurrences/${date}`;
+  }
+
+  async function patchOccurrence(
+    seriesId: string,
+    date: string,
+    body: object,
+  ): Promise<Occurrence & { seriesVersion: number }> {
+    const res = await authed(http().patch(occurrenceUrl(seriesId, date)))
+      .send(body)
+      .expect(200);
+    return (res.body as { data: Occurrence & { seriesVersion: number } }).data;
+  }
+
+  /** A daily block from `date` holding a task that repeats with it. */
+  async function dailyBlockTask(
+    date: string,
+  ): Promise<{ seriesId: string; first: Task }> {
+    const seriesId = await postBlock({ date, recurrence: { kind: 'daily' } });
+    const first = await createTask({
+      title: 'Stretch',
+      date,
+      blockSeriesId: seriesId,
+      repeatWithBlock: true,
+    });
+    return { seriesId, first };
+  }
+
   async function seriesCount(): Promise<number> {
     const { rows } = await pool.query<{ n: number }>(
       'SELECT count(*)::int AS n FROM task_series',
@@ -581,6 +610,168 @@ describe('Repeating tasks (e2e)', () => {
       expect(await seriesCount()).toBe(0);
       expect(await tasksOn(addDays(today, 2))).toEqual([]);
     });
+  });
+
+  describe('with its block', () => {
+    it('splits a skipped occurrence’s task off onto the general list', async () => {
+      const { seriesId } = await dailyBlockTask(future);
+      const date = addDays(future, 1);
+      const copy = (await tasksOn(date))[0]!;
+
+      await authed(http().post(`${occurrenceUrl(seriesId, date)}/skip`))
+        .send()
+        .expect(200);
+
+      expect((await getDay(date)).generalList).toMatchObject([
+        { id: copy.id, repeat: null },
+      ]);
+      expect(await tasksOn(addDays(future, 2))).toMatchObject([
+        { title: 'Stretch', blockSeriesId: seriesId },
+      ]);
+    });
+
+    it('splits a deleted occurrence’s task off onto the general list', async () => {
+      const { seriesId } = await dailyBlockTask(future);
+      const date = addDays(future, 1);
+      const copy = (await tasksOn(date))[0]!;
+
+      await authed(http().delete(occurrenceUrl(seriesId, date))).expect(200);
+
+      expect((await getDay(date)).generalList).toMatchObject([
+        { id: copy.id, repeat: null },
+      ]);
+    });
+
+    it('stops with a block deleted from today on, removing its open copies', async () => {
+      await setTimeZone(AHEAD);
+      const today = todayIn(AHEAD);
+      const { seriesId, first } = await dailyBlockTask(addDays(today, -2));
+      const yesterday = (await tasksOn(addDays(today, -1)))[0]!;
+      await tasksOn(today);
+      const tomorrow = (await tasksOn(addDays(today, 1)))[0]!;
+      await setDone(tomorrow.id, true);
+
+      const res = await authed(
+        http().delete(`${occurrenceUrl(seriesId, today)}?scope=series`),
+      ).expect(200);
+
+      expect(res.body).toEqual({ data: { movedTaskCount: 1 } });
+      expect(first).toMatchObject({ missed: true });
+      expect(await tasksOn(addDays(today, -1))).toMatchObject([
+        { id: yesterday.id, blockSeriesId: seriesId },
+      ]);
+      expect(await tasksOn(today)).toEqual([]);
+      expect((await getDay(addDays(today, 1))).generalList).toMatchObject([
+        { id: tomorrow.id, done: true, repeat: null },
+      ]);
+    });
+
+    it('carries on with the new block when its block splits', async () => {
+      const { seriesId } = await dailyBlockTask(future);
+      const before = (await tasksOn(addDays(future, 1)))[0]!;
+      const at = (await tasksOn(addDays(future, 2)))[0]!;
+
+      const next = await patchOccurrence(seriesId, addDays(future, 2), {
+        version: 0,
+        scope: 'thisAndFuture',
+        name: 'Mobility',
+      });
+
+      expect(next.seriesId).not.toBe(seriesId);
+      expect(next.tasks).toMatchObject([
+        { id: at.id, repeat: { mode: 'withBlock' } },
+      ]);
+      expect(await tasksOn(before.date)).toMatchObject([
+        { id: before.id, blockSeriesId: seriesId },
+      ]);
+      expect(await tasksOn(addDays(future, 4))).toMatchObject([
+        { title: 'Stretch', blockSeriesId: next.seriesId },
+      ]);
+    });
+
+    it('moves with its block’s first occurrence', async () => {
+      const { seriesId, first } = await dailyBlockTask(future);
+      const newDate = addDays(future, 1);
+
+      const moved = await patchOccurrence(seriesId, future, {
+        version: 0,
+        scope: 'thisAndFuture',
+        newDate,
+      });
+
+      expect(moved.tasks).toMatchObject([
+        { id: first.id, date: newDate, repeat: { mode: 'withBlock' } },
+      ]);
+      expect(await tasksOn(addDays(future, 2))).toMatchObject([
+        { title: 'Stretch' },
+      ]);
+    });
+
+    it('stops repeating when its block does', async () => {
+      const { seriesId, first } = await dailyBlockTask(future);
+      const copy = (await tasksOn(addDays(future, 1)))[0]!;
+
+      const edited = await patchOccurrence(seriesId, future, {
+        version: 0,
+        scope: 'thisAndFuture',
+        recurrence: { kind: 'none' },
+      });
+
+      expect(edited.tasks).toMatchObject([{ id: first.id, repeat: null }]);
+      expect((await getDay(copy.date)).generalList).toMatchObject([
+        { id: copy.id, repeat: null },
+      ]);
+      expect(await seriesCount()).toBe(0);
+    });
+
+    it('splits off with an occurrence moved to another date', async () => {
+      const { seriesId } = await dailyBlockTask(future);
+      const date = addDays(future, 1);
+      const copy = (await tasksOn(date))[0]!;
+
+      const moved = await patchOccurrence(seriesId, date, {
+        version: 0,
+        newDate: addDays(future, 10),
+      });
+
+      expect(moved.tasks).toMatchObject([{ id: copy.id, repeat: null }]);
+    });
+
+    it('issues an occurrence an edit returns', async () => {
+      const { seriesId } = await dailyBlockTask(future);
+      const date = addDays(future, 3);
+
+      const edited = await patchOccurrence(seriesId, date, {
+        version: 0,
+        name: 'Mobility',
+      });
+
+      expect(edited.tasks).toMatchObject([{ title: 'Stretch', date }]);
+      expect(await tasksOn(date)).toHaveLength(1);
+    });
+  });
+
+  it('schedules a repeating task’s reminders, even for a day not yet read', async () => {
+    await createTask({
+      title: 'Bins out',
+      date: future,
+      reminderAt: `${addDays(future, -1)}T20:00`,
+      recurrence: { kind: 'daily' },
+    });
+    const day = addDays(future, 5);
+
+    const res = await authed(
+      http().get(`/api/v1/notifications/schedule?from=${day}&to=${day}`),
+    ).expect(200);
+
+    expect(res.body).toMatchObject({
+      data: {
+        taskReminders: [{ title: 'Bins out', remindAt: `${day}T20:00` }],
+      },
+    });
+    expect(await tasksOn(addDays(day, 1))).toMatchObject([
+      { reminderAt: `${day}T20:00` },
+    ]);
   });
 
   describe('on a closed day', () => {
