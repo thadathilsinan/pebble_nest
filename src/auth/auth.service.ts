@@ -10,8 +10,12 @@ import {
 import { PinoLogger } from 'nestjs-pino';
 import { ENV } from '../core/config/config.module';
 import type { Env } from '../core/config/env.schema';
-import { DB, type Db } from '../core/database/database.module';
-import type { SessionRow, UserRow } from '../core/database/schema';
+import { DB, type Db, type Executor } from '../core/database/database.module';
+import type {
+  SessionRow,
+  SignInMethod,
+  UserRow,
+} from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
@@ -68,6 +72,14 @@ export interface SessionResponse {
   profile: Profile;
 }
 
+/** A new device session, and whether signing in opened the account. */
+interface SignedIn {
+  user: UserRow;
+  created: boolean;
+  session: SessionRow;
+  refreshToken: string;
+}
+
 /**
  * What the verify transaction decided. Returned rather than thrown, because
  * throwing inside the transaction would roll back the attempt it just counted
@@ -77,13 +89,7 @@ type VerifyOutcome =
   | { outcome: 'expired' }
   | { outcome: 'exhausted' }
   | { outcome: 'invalid'; attemptsLeft: number }
-  | {
-      outcome: 'signedIn';
-      user: UserRow;
-      created: boolean;
-      session: SessionRow;
-      refreshToken: string;
-    };
+  | ({ outcome: 'signedIn' } & SignedIn);
 
 /**
  * What the refresh transaction decided. Returned rather than thrown for the
@@ -179,24 +185,10 @@ export class AuthService {
         }
 
         await this.codes.consume(tx, stored.id);
-        const { row: user, created } = await this.users.findOrCreateByEmail(
-          tx,
-          email,
-        );
-        const refresh = newRefreshToken();
-        const session = await this.sessions.create(tx, {
-          userId: user.id,
-          signInMethod: 'email',
-          refreshTokenHash: refresh.hash,
-          ttlDays: this.env.REFRESH_TOKEN_TTL_DAYS,
-        });
 
         return {
           outcome: 'signedIn',
-          user,
-          created,
-          session,
-          refreshToken: refresh.token,
+          ...(await this.openSession(tx, email, 'email')),
         };
       },
     );
@@ -312,6 +304,32 @@ export class AuthService {
       this.db,
       hashRefreshToken(refreshToken),
     );
+  }
+
+  /**
+   * Signs `email` in on a new device session, opening the account first if
+   * the email has none (ACC-03: the email is the account, whichever method
+   * proved it). Runs inside the caller's transaction, so whatever proved the
+   * email commits with the session or not at all.
+   */
+  private async openSession(
+    tx: Executor,
+    email: string,
+    signInMethod: SignInMethod,
+  ): Promise<SignedIn> {
+    const { row: user, created } = await this.users.findOrCreateByEmail(
+      tx,
+      email,
+    );
+    const refresh = newRefreshToken();
+    const session = await this.sessions.create(tx, {
+      userId: user.id,
+      signInMethod,
+      refreshTokenHash: refresh.hash,
+      ttlDays: this.env.REFRESH_TOKEN_TTL_DAYS,
+    });
+
+    return { user, created, session, refreshToken: refresh.token };
   }
 
   private tokenInvalid(): UnauthorizedException {
