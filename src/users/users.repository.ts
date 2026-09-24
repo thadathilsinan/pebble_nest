@@ -1,7 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { and, eq, or, sql, type SQL } from 'drizzle-orm';
 import type { Executor } from '../core/database/database.module';
-import { users, type UserRow } from '../core/database/schema';
+import {
+  blockSeries,
+  taskLedgerEntries,
+  tasks,
+  users,
+  type UserRow,
+} from '../core/database/schema';
 
 /** The profile fields `PATCH /me` may write. */
 export type ProfilePatch = Partial<
@@ -17,6 +23,12 @@ export type VersionedUpdate =
   | { outcome: 'updated'; row: UserRow }
   | { outcome: 'stale'; row: UserRow }
   | { outcome: 'missing' };
+
+/** Where a user's record begins: `Profile`'s last two fields. */
+export interface RecordStart {
+  firstRecordedDay: string | null;
+  hasAnyRecord: boolean;
+}
 
 @Injectable()
 export class UsersRepository {
@@ -138,6 +150,32 @@ export class UsersRepository {
     const [row] = await ex.delete(users).where(eq(users.id, id)).returning();
 
     return row ?? null;
+  }
+
+  /**
+   * Where the user's record begins, for `Profile`. `firstRecordedDay` is the
+   * earliest block anchor, task date or ledger day: the review's range
+   * picker goes back no further, and no block starts before it.
+   * `hasAnyRecord` is whether any block or task exists, as the app's Now
+   * screen asks. A deleted task's ledger days can therefore set the start
+   * without being a record. Each `min` and `EXISTS` reads a `user_id` index;
+   * `LEAST` skips the nulls of empty tables.
+   */
+  async findRecordStart(ex: Executor, userId: string): Promise<RecordStart> {
+    const blocks = sql`SELECT 1 FROM ${blockSeries} WHERE ${blockSeries.userId} = ${userId}`;
+    const taskRows = sql`SELECT 1 FROM ${tasks} WHERE ${tasks.userId} = ${userId}`;
+    const [row] = await ex
+      .select({
+        firstRecordedDay: sql<string | null>`LEAST(
+          (SELECT min(${blockSeries.anchorDate}) FROM ${blockSeries} WHERE ${blockSeries.userId} = ${userId}),
+          (SELECT min(${tasks.date}) FROM ${tasks} WHERE ${tasks.userId} = ${userId}),
+          (SELECT min(${taskLedgerEntries.day}) FROM ${taskLedgerEntries} WHERE ${taskLedgerEntries.userId} = ${userId})
+        )::text`,
+        hasAnyRecord: sql<boolean>`EXISTS (${blocks}) OR EXISTS (${taskRows})`,
+      })
+      .from(users)
+      .where(eq(users.id, userId));
+    return row ?? { firstRecordedDay: null, hasAnyRecord: false };
   }
 
   async findById(ex: Executor, id: string): Promise<UserRow | null> {

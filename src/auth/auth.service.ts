@@ -330,14 +330,17 @@ export class AuthService {
     }: { user: UserRow; session: SessionRow; refreshToken: string },
     isNewAccount: boolean,
   ): Promise<SessionResponse> {
-    const access = await this.accessTokens.issue(user.id, session.id);
+    const [access, record] = await Promise.all([
+      this.accessTokens.issue(user.id, session.id),
+      this.users.findRecordStart(this.db, user.id),
+    ]);
 
     return {
       accessToken: access.token,
       accessTokenExpiresAt: access.expiresAt.toISOString(),
       refreshToken,
       isNewAccount,
-      profile: toProfile(user, session.signInMethod),
+      profile: toProfile(user, session.signInMethod, record),
     };
   }
 }

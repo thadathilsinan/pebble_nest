@@ -83,7 +83,10 @@ describe('AuthService', () => {
     >
   >;
   let users: jest.Mocked<
-    Pick<UsersRepository, 'findOrCreateByEmail' | 'findById'>
+    Pick<
+      UsersRepository,
+      'findOrCreateByEmail' | 'findById' | 'findRecordStart'
+    >
   >;
   let sessions: jest.Mocked<
     Pick<
@@ -114,6 +117,9 @@ describe('AuthService', () => {
         .fn()
         .mockResolvedValue({ row: user, created: false }),
       findById: jest.fn().mockResolvedValue(user),
+      findRecordStart: jest
+        .fn()
+        .mockResolvedValue({ firstRecordedDay: null, hasAnyRecord: false }),
     };
     sessions = {
       create: jest.fn().mockResolvedValue(session),

@@ -4,7 +4,7 @@ import { accessTokenInvalid } from '../auth/errors';
 import { SessionsRepository } from '../auth/sessions.repository';
 import { SignInCodesRepository } from '../auth/sign-in-codes.repository';
 import { DB, type Db, type Executor } from '../core/database/database.module';
-import type { SessionRow } from '../core/database/schema';
+import type { SessionRow, UserRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
 import { UsersRepository } from '../users/users.repository';
@@ -37,7 +37,7 @@ export class MeService {
     const user = await this.users.findById(this.db, caller.userId);
     if (user === null) throw accessTokenInvalid();
 
-    return toProfile(user, session.signInMethod);
+    return this.profile(user, session);
   }
 
   /**
@@ -60,7 +60,7 @@ export class MeService {
       );
       if (user === null) throw accessTokenInvalid();
 
-      return toProfile(user, session.signInMethod);
+      return this.profile(user, session);
     }
 
     const { version, ...patch } = body;
@@ -77,12 +77,12 @@ export class MeService {
 
     switch (result.outcome) {
       case 'updated':
-        return toProfile(result.row, session.signInMethod);
+        return this.profile(result.row, session);
       case 'stale':
         throw new ConflictException({
           code: 'STALE_VERSION' satisfies ErrorCode,
           message: 'The profile was changed elsewhere. Re-apply and retry.',
-          meta: { current: toProfile(result.row, session.signInMethod) },
+          meta: { current: await this.profile(result.row, session) },
         });
       case 'missing':
         // The account was deleted after the session read.
@@ -113,6 +113,12 @@ export class MeService {
 
       await this.signInCodes.deleteByEmail(tx, user.email);
     });
+  }
+
+  /** The `Profile` for `user` on the device holding `session`. */
+  private async profile(user: UserRow, session: SessionRow): Promise<Profile> {
+    const record = await this.users.findRecordStart(this.db, user.id);
+    return toProfile(user, session.signInMethod, record);
   }
 
   private async liveSession(ex: Executor, caller: Caller): Promise<SessionRow> {

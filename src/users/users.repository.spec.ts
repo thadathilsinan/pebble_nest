@@ -1,5 +1,8 @@
 import { openTestDatabase, type TestDatabase } from '../core/database/testing';
 import { SessionsRepository } from '../auth/sessions.repository';
+import { BlocksRepository } from '../blocks/blocks.repository';
+import { taskLedgerEntries } from '../core/database/schema';
+import { TasksRepository } from '../tasks/tasks.repository';
 import { UsersRepository } from './users.repository';
 
 describe('UsersRepository (integration)', () => {
@@ -205,6 +208,104 @@ describe('UsersRepository (integration)', () => {
       await expect(
         repo.deleteById(t.db, '01900000-0000-7000-8000-000000000000'),
       ).resolves.toBeNull();
+    });
+  });
+
+  describe('findRecordStart', () => {
+    const blocks = new BlocksRepository();
+    const tasks = new TasksRepository();
+
+    function newBlock(userId: string, anchorDate: string) {
+      return blocks.create(t.db, {
+        userId,
+        name: 'Deep work',
+        anchorDate,
+        startMin: 540,
+        endMin: 600,
+        recurrenceKind: 'none',
+        weekdays: [],
+        monthDays: [],
+        until: null,
+        alert: false,
+      });
+    }
+
+    function newTask(userId: string, date: string) {
+      return tasks.create(t.db, {
+        userId,
+        blockSeriesId: null,
+        date,
+        title: 'Write the report',
+        notes: '',
+        reminderDate: null,
+        reminderMin: null,
+        carryCount: 0,
+      });
+    }
+
+    it('finds no record for a new account', async () => {
+      const { row } = await repo.findOrCreateByEmail(t.db, 'me@example.com');
+
+      expect(await repo.findRecordStart(t.db, row.id)).toEqual({
+        firstRecordedDay: null,
+        hasAnyRecord: false,
+      });
+    });
+
+    it('takes the earliest of block anchors, task dates and ledger days, and only the user’s own', async () => {
+      const { row: me } = await repo.findOrCreateByEmail(
+        t.db,
+        'me@example.com',
+      );
+      const { row: other } = await repo.findOrCreateByEmail(
+        t.db,
+        'other@example.com',
+      );
+      await newBlock(me.id, '2026-09-20');
+      const { row: task } = await newTask(me.id, '2026-09-24');
+      await t.db.insert(taskLedgerEntries).values({
+        userId: me.id,
+        taskId: task.id,
+        day: '2026-09-18',
+        outcome: 'incomplete',
+        title: task.title,
+      });
+      await newBlock(other.id, '2026-01-01');
+
+      expect(await repo.findRecordStart(t.db, me.id)).toEqual({
+        firstRecordedDay: '2026-09-18',
+        hasAnyRecord: true,
+      });
+    });
+
+    it('counts a task alone as a record', async () => {
+      const { row } = await repo.findOrCreateByEmail(t.db, 'me@example.com');
+      await newTask(row.id, '2026-09-24');
+
+      expect(await repo.findRecordStart(t.db, row.id)).toEqual({
+        firstRecordedDay: '2026-09-24',
+        hasAnyRecord: true,
+      });
+    });
+
+    it('keeps a deleted task’s ledger days as the start, but not as a record', async () => {
+      const { row } = await repo.findOrCreateByEmail(t.db, 'me@example.com');
+      const { row: task } = await newTask(row.id, '2026-09-24');
+      await t.db.insert(taskLedgerEntries).values({
+        userId: row.id,
+        taskId: task.id,
+        day: '2026-09-22',
+        outcome: 'incomplete',
+        title: task.title,
+      });
+      await tasks.delete(t.db, row.id, task.id);
+
+      // As in the app: the Now screen's "anything yet?" counts blocks and
+      // tasks, while the review can still reach back to the recorded day.
+      expect(await repo.findRecordStart(t.db, row.id)).toEqual({
+        firstRecordedDay: '2026-09-22',
+        hasAnyRecord: false,
+      });
     });
   });
 });

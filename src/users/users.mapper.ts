@@ -4,6 +4,7 @@ import type {
   UserRow,
   WeekStart,
 } from '../core/database/schema';
+import type { RecordStart } from './users.repository';
 
 /** `Profile` in `docs/api-plan.md` §2. */
 export interface Profile {
@@ -17,11 +18,17 @@ export interface Profile {
   weekStart: WeekStart;
   timeFormat: TimeFormat;
   timeZone: string | null;
+  /** The review's range picker goes back no further. */
   firstRecordedDay: string | null;
+  /** Whether any block or task exists, for the Now screen's empty state. */
   hasAnyRecord: boolean;
 }
 
-export function toProfile(row: UserRow, signInMethod: SignInMethod): Profile {
+export function toProfile(
+  row: UserRow,
+  signInMethod: SignInMethod,
+  record: RecordStart,
+): Profile {
   return {
     id: row.id,
     version: row.version,
@@ -31,9 +38,7 @@ export function toProfile(row: UserRow, signInMethod: SignInMethod): Profile {
     weekStart: row.weekStart,
     timeFormat: row.timeFormat,
     timeZone: row.timeZone,
-    // Both are derived from the day ledger, which does not exist yet. Until it
-    // does, every account is truthfully one with no record.
-    firstRecordedDay: null,
-    hasAnyRecord: false,
+    firstRecordedDay: record.firstRecordedDay,
+    hasAnyRecord: record.hasAnyRecord,
   };
 }
