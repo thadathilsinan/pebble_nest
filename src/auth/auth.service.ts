@@ -26,10 +26,8 @@ import type { RefreshSessionBody } from './dto/refresh-session.dto';
 import type { RequestSignInCodeBody } from './dto/request-sign-in-code.dto';
 import type { SignOutBody } from './dto/sign-out.dto';
 import type { VerifySignInCodeBody } from './dto/verify-sign-in-code.dto';
-import {
-  GOOGLE_ID_TOKENS,
-  type GoogleIdTokens,
-} from './google/google-id-tokens';
+import { GOOGLE_ID_TOKENS } from './google/google-id-tokens';
+import type { IdTokens } from './id-tokens/id-tokens';
 import { MAILER, type Mailer } from './mailer/mailer';
 import { SessionsRepository } from './sessions.repository';
 import {
@@ -120,7 +118,7 @@ export class AuthService {
     private readonly sessions: SessionsRepository,
     private readonly accessTokens: AccessTokensService,
     @Inject(MAILER) private readonly mailer: Mailer,
-    @Inject(GOOGLE_ID_TOKENS) private readonly googleIdTokens: GoogleIdTokens,
+    @Inject(GOOGLE_ID_TOKENS) private readonly googleIdTokens: IdTokens,
     @Inject(DB) private readonly db: Db,
     @Inject(ENV) private readonly env: Env,
     private readonly logger: PinoLogger,

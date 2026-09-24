@@ -6,10 +6,7 @@ import type { SessionRow, UserRow } from '../core/database/schema';
 import type { UsersRepository } from '../users/users.repository';
 import type { AccessTokensService } from './access-tokens.service';
 import { AuthService } from './auth.service';
-import type {
-  GoogleIdTokenCheck,
-  GoogleIdTokens,
-} from './google/google-id-tokens';
+import type { IdTokenCheck, IdTokens } from './id-tokens/id-tokens';
 import type { Mailer } from './mailer/mailer';
 import { hashRefreshToken, hashSignInCode } from './secrets';
 import type { LockedSession, SessionsRepository } from './sessions.repository';
@@ -107,7 +104,7 @@ describe('AuthService', () => {
   let warn: jest.Mock;
   let mailer: Mailer;
   let sendSignInCode: jest.Mock<Promise<void>, [string, string]>;
-  let verifyGoogle: jest.Mock<Promise<GoogleIdTokenCheck>, [string]>;
+  let verifyGoogle: jest.Mock<Promise<IdTokenCheck>, [string]>;
   let env: Env;
   let service: AuthService;
 
@@ -146,8 +143,8 @@ describe('AuthService', () => {
         .fn()
         .mockResolvedValue({ token: 'jwt', expiresAt: new Date(0) }),
     };
-    verifyGoogle = jest.fn<Promise<GoogleIdTokenCheck>, [string]>();
-    const googleIdTokens: GoogleIdTokens = { verify: verifyGoogle };
+    verifyGoogle = jest.fn<Promise<IdTokenCheck>, [string]>();
+    const googleIdTokens: IdTokens = { verify: verifyGoogle };
     env = {
       SIGN_IN_CODE_SECRET: SECRET,
       REFRESH_TOKEN_TTL_DAYS: 60,

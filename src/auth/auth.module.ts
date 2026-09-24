@@ -8,8 +8,7 @@ import { AccessTokensService } from './access-tokens.service';
 import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
-import { GOOGLE_ID_TOKENS } from './google/google-id-tokens';
-import { GoogleJwksVerifier } from './google/google-jwks-verifier';
+import { GOOGLE_ID_TOKENS, googleIdTokens } from './google/google-id-tokens';
 import { LogMailer } from './mailer/log-mailer';
 import { MAILER } from './mailer/mailer';
 import { SessionsRepository } from './sessions.repository';
@@ -43,7 +42,7 @@ import { SignInCodesRepository } from './sign-in-codes.repository';
     {
       provide: GOOGLE_ID_TOKENS,
       inject: [ENV],
-      useFactory: (env: Env) => new GoogleJwksVerifier(env.GOOGLE_CLIENT_IDS),
+      useFactory: (env: Env) => googleIdTokens(env.GOOGLE_CLIENT_IDS),
     },
     // Global: every route in the app needs an access token unless it is
     // `@Public()`. Registered here rather than in `AppModule` because it

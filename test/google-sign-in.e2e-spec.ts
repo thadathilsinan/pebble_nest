@@ -3,11 +3,8 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import type { Pool } from 'pg';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
-import {
-  GOOGLE_ID_TOKENS,
-  type GoogleIdTokenCheck,
-  type GoogleIdTokens,
-} from '../src/auth/google/google-id-tokens';
+import { GOOGLE_ID_TOKENS } from '../src/auth/google/google-id-tokens';
+import type { IdTokenCheck, IdTokens } from '../src/auth/id-tokens/id-tokens';
 import { MAILER, type Mailer } from '../src/auth/mailer/mailer';
 import { configureApp } from '../src/core/bootstrap/configure-app';
 import { ENV } from '../src/core/config/config.module';
@@ -49,11 +46,11 @@ class FakeMailer implements Mailer {
  * Stands in for Google: each token string is given the verdict a test sets
  * for it, and any other is invalid. The real verifier has its own spec.
  */
-class FakeGoogleIdTokens implements GoogleIdTokens {
-  readonly verdicts = new Map<string, GoogleIdTokenCheck>();
+class FakeGoogleIdTokens implements IdTokens {
+  readonly verdicts = new Map<string, IdTokenCheck>();
   calls = 0;
 
-  verify(idToken: string): Promise<GoogleIdTokenCheck> {
+  verify(idToken: string): Promise<IdTokenCheck> {
     this.calls += 1;
     return Promise.resolve(
       this.verdicts.get(idToken) ?? { outcome: 'invalid' },

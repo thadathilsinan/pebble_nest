@@ -1,43 +1,37 @@
 import { createPublicKey, type JsonWebKey, type KeyObject } from 'node:crypto';
 import { decode, verify, type JwtPayload } from 'jsonwebtoken';
 import { emailAddress } from '../dto/email';
-import type {
-  GoogleAccount,
-  GoogleIdTokenCheck,
-  GoogleIdTokens,
-} from './google-id-tokens';
-
-/** Where Google publishes the keys its ID tokens are signed with. */
-export const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
-
-/** Google writes `iss` both ways (its OpenID Connect docs). */
-const GOOGLE_ISSUERS: [string, ...string[]] = [
-  'accounts.google.com',
-  'https://accounts.google.com',
-];
-
-/** `PATCH /me`'s limit, so a Google name is one the user could have typed. */
-const MAX_NAME_LENGTH = 80;
+import type { IdTokenAccount, IdTokenCheck, IdTokens } from './id-tokens';
+import { providerName } from './provider-name';
 
 /**
  * The shortest time between two fetches of the key set. A token naming a key
- * the cache lacks refetches, since Google may have rotated one in, but no
- * sooner than this: `kid` is chosen by whoever sent the token, so without the
- * floor anyone could make every request cost a call to Google.
+ * the cache lacks refetches, since the provider may have rotated one in, but
+ * no sooner than this: `kid` is chosen by whoever sent the token, so without
+ * the floor anyone could make every request cost a call to the provider.
  */
 const MIN_REFETCH_MS = 5 * 60 * 1000;
 
-/** Used when Google's response carries no `max-age`. */
+/** Used when the provider's response carries no `max-age`. */
 const DEFAULT_MAX_AGE_SECONDS = 60 * 60;
 
-/** A key set and how long Google says it may be kept. */
-export interface GoogleKeySet {
+/** A key set and how long the provider says it may be kept. */
+export interface KeySet {
   keys: JsonWebKey[];
   maxAgeSeconds: number;
 }
 
-/** Fetches Google's key set. Rejects when it can't. */
-export type FetchGoogleKeys = () => Promise<GoogleKeySet>;
+/** Fetches a provider's key set. Rejects when it can't. */
+export type FetchKeys = () => Promise<KeySet>;
+
+/** Whose tokens a verifier accepts. */
+export interface JwksVerifierOptions {
+  /** Every accepted spelling of the provider's `iss`. */
+  issuers: [string, ...string[]];
+  /** Our client IDs: a token for any other audience is someone else's. */
+  audiences: string[];
+  fetchKeys: FetchKeys;
+}
 
 interface CachedKeys {
   byKid: Map<string, KeyObject>;
@@ -46,26 +40,26 @@ interface CachedKeys {
 }
 
 /**
- * Checks Google ID tokens against Google's published keys: an RS256
- * signature by a current key, Google's issuer, one of our client IDs as the
- * audience, an unexpired token, and a verified email.
+ * Checks OpenID Connect ID tokens against a provider's published keys: an
+ * RS256 signature by a current key, the provider's issuer, one of our client
+ * IDs as the audience, an unexpired token, and a verified email. Google's and
+ * Apple's tokens both fit this shape.
  *
- * The key set is cached for as long as Google's `Cache-Control` says, and
- * concurrent requests share one fetch. When a fetch fails, a key already
- * cached is still used, since a key Google published minutes ago is still
- * Google's; only a token no cached key can check is `unavailable`.
+ * The key set is cached for as long as the provider's `Cache-Control` says,
+ * and concurrent requests share one fetch. When a fetch fails, a key already
+ * cached is still used, since a key published minutes ago is still the
+ * provider's; only a token no cached key can check is `unavailable`.
  */
-export class GoogleJwksVerifier implements GoogleIdTokens {
+export class JwksVerifier implements IdTokens {
   private cache: CachedKeys | null = null;
   private fetching: Promise<CachedKeys> | null = null;
 
   constructor(
-    private readonly clientIds: string[],
-    private readonly fetchKeys: FetchGoogleKeys = fetchGoogleKeys,
+    private readonly options: JwksVerifierOptions,
     private readonly now: () => number = Date.now,
   ) {}
 
-  async verify(idToken: string): Promise<GoogleIdTokenCheck> {
+  async verify(idToken: string): Promise<IdTokenCheck> {
     const header = decode(idToken, { complete: true })?.header;
 
     // RS256 is checked again by `verify`; refusing others here keeps an HS256
@@ -87,8 +81,8 @@ export class GoogleJwksVerifier implements GoogleIdTokens {
     try {
       claims = verify(idToken, key, {
         algorithms: ['RS256'],
-        issuer: GOOGLE_ISSUERS,
-        audience: this.clientIds as [string, ...string[]],
+        issuer: this.options.issuers,
+        audience: this.options.audiences as [string, ...string[]],
       }) as JwtPayload;
     } catch {
       return { outcome: 'invalid' };
@@ -103,8 +97,9 @@ export class GoogleJwksVerifier implements GoogleIdTokens {
 
   /**
    * The cached key for `kid`, refetching the set when it has expired, or when
-   * it lacks `kid` and was fetched long enough ago. `null` for a key Google
-   * doesn't have. Rejects only when a fetch fails and no cached key fits.
+   * it lacks `kid` and was fetched long enough ago. `null` for a key the
+   * provider doesn't have. Rejects only when a fetch fails and no cached key
+   * fits.
    */
   private async keyFor(kid: string): Promise<KeyObject | null> {
     const now = this.now();
@@ -124,7 +119,8 @@ export class GoogleJwksVerifier implements GoogleIdTokens {
   }
 
   private refresh(): Promise<CachedKeys> {
-    this.fetching ??= this.fetchKeys()
+    this.fetching ??= this.options
+      .fetchKeys()
       .then(({ keys, maxAgeSeconds }) => {
         const fetchedAt = this.now();
         this.cache = {
@@ -142,19 +138,22 @@ export class GoogleJwksVerifier implements GoogleIdTokens {
   }
 }
 
-/** Google's live key set. The three-second limit keeps sign-in from hanging. */
-export async function fetchGoogleKeys(): Promise<GoogleKeySet> {
-  const res = await fetch(GOOGLE_JWKS_URL, {
-    signal: AbortSignal.timeout(3000),
-  });
-  if (!res.ok) throw new Error(`Google's keys answered ${res.status}`);
+/**
+ * Fetches the key set published at `url`. The three-second limit keeps
+ * sign-in from hanging.
+ */
+export function fetchJwks(url: string): FetchKeys {
+  return async () => {
+    const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) throw new Error(`${url} answered ${res.status}`);
 
-  const body = (await res.json()) as { keys?: unknown };
-  if (!Array.isArray(body.keys)) throw new Error("Google's keys had no keys");
+    const body = (await res.json()) as { keys?: unknown };
+    if (!Array.isArray(body.keys)) throw new Error(`${url} had no keys`);
 
-  return {
-    keys: body.keys as JsonWebKey[],
-    maxAgeSeconds: maxAgeOf(res.headers.get('cache-control')),
+    return {
+      keys: body.keys as JsonWebKey[],
+      maxAgeSeconds: maxAgeOf(res.headers.get('cache-control')),
+    };
   };
 }
 
@@ -182,30 +181,16 @@ function publicKeysByKid(keys: JsonWebKey[]): Map<string, KeyObject> {
 
 /**
  * The account a verified token names, or `null` when it proves no email:
- * none, one Google hasn't verified, or one sign-in wouldn't accept.
- * `email_verified` is a boolean today; the string form is from Google's older
- * tokens.
+ * none, one the provider hasn't verified, or one sign-in wouldn't accept.
+ * `email_verified` is a boolean in Google's tokens today; the string form is
+ * from Google's older tokens, and Apple sends either.
  */
-function accountFrom(claims: JwtPayload): GoogleAccount | null {
+function accountFrom(claims: JwtPayload): IdTokenAccount | null {
   const verified: unknown = claims.email_verified;
   if (verified !== true && verified !== 'true') return null;
 
   const email = emailAddress.safeParse(claims.email);
   if (!email.success) return null;
 
-  return { email: email.data, name: nameFrom(claims.name) };
-}
-
-/** Trimmed and cut to 80 characters, never through a surrogate pair. */
-function nameFrom(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null;
-
-  let name = raw.trim();
-  if (name.length > MAX_NAME_LENGTH) {
-    name = name.slice(0, MAX_NAME_LENGTH);
-    if (/[\uD800-\uDBFF]$/.test(name)) name = name.slice(0, -1);
-    name = name.trimEnd();
-  }
-
-  return name === '' ? null : name;
+  return { email: email.data, name: providerName(claims.name) };
 }

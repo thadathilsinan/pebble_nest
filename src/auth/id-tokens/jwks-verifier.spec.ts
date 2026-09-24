@@ -4,13 +4,10 @@ import {
   type KeyObject,
 } from 'node:crypto';
 import { sign, type SignOptions } from 'jsonwebtoken';
-import {
-  GoogleJwksVerifier,
-  maxAgeOf,
-  type GoogleKeySet,
-} from './google-jwks-verifier';
+import { JwksVerifier, maxAgeOf, type KeySet } from './jwks-verifier';
 
-const CLIENT_ID = 'ios-client.apps.googleusercontent.com';
+const CLIENT_ID = 'ios-client';
+const ISSUER = 'https://issuer.example.com';
 
 function rsaKey(kid: string): { privateKey: KeyObject; jwk: JsonWebKey } {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -24,7 +21,7 @@ function rsaKey(kid: string): { privateKey: KeyObject; jwk: JsonWebKey } {
 }
 
 // Generated once: RSA key generation is the slow part of this file.
-const google = rsaKey('k1');
+const provider = rsaKey('k1');
 const stranger = rsaKey('k1');
 const rotatedIn = rsaKey('k2');
 
@@ -37,45 +34,48 @@ const CLAIMS = {
 function token(
   claims: Record<string, unknown> = CLAIMS,
   options: Partial<SignOptions> = {},
-  key: KeyObject = google.privateKey,
+  key: KeyObject = provider.privateKey,
 ): string {
   return sign(claims, key, {
     algorithm: 'RS256',
     keyid: 'k1',
-    issuer: 'https://accounts.google.com',
+    issuer: ISSUER,
     audience: CLIENT_ID,
     expiresIn: 3600,
     ...options,
   });
 }
 
-describe('GoogleJwksVerifier', () => {
-  let keySet: GoogleKeySet;
-  let fetchKeys: jest.Mock<Promise<GoogleKeySet>, []>;
+describe('JwksVerifier', () => {
+  let keySet: KeySet;
+  let fetchKeys: jest.Mock<Promise<KeySet>, []>;
   let now: number;
-  let verifier: GoogleJwksVerifier;
+  let verifier: JwksVerifier;
 
   beforeEach(() => {
-    keySet = { keys: [google.jwk], maxAgeSeconds: 3600 };
+    keySet = { keys: [provider.jwk], maxAgeSeconds: 3600 };
     fetchKeys = jest.fn(() => Promise.resolve(keySet));
     now = Date.now();
-    verifier = new GoogleJwksVerifier(
-      ['web-client', CLIENT_ID],
-      fetchKeys,
+    verifier = new JwksVerifier(
+      {
+        issuers: [ISSUER, 'issuer.example.com'],
+        audiences: ['web-client', CLIENT_ID],
+        fetchKeys,
+      },
       () => now,
     );
   });
 
-  it('verifies a Google token and returns the account as Pebble stores it', async () => {
+  it('verifies a token and returns the account as Pebble stores it', async () => {
     await expect(verifier.verify(token())).resolves.toEqual({
       outcome: 'verified',
       account: { email: 'me@example.com', name: 'Ada Lovelace' },
     });
   });
 
-  it('accepts either spelling of the issuer', async () => {
+  it('accepts every spelling of the issuer', async () => {
     await expect(
-      verifier.verify(token(CLAIMS, { issuer: 'accounts.google.com' })),
+      verifier.verify(token(CLAIMS, { issuer: 'issuer.example.com' })),
     ).resolves.toMatchObject({ outcome: 'verified' });
   });
 
@@ -96,10 +96,10 @@ describe('GoogleJwksVerifier', () => {
   });
 
   it('refuses an HS256 token keyed with the public key', async () => {
-    const forged = sign(CLAIMS, JSON.stringify(google.jwk), {
+    const forged = sign(CLAIMS, JSON.stringify(provider.jwk), {
       algorithm: 'HS256',
       keyid: 'k1',
-      issuer: 'https://accounts.google.com',
+      issuer: ISSUER,
       audience: CLIENT_ID,
     });
 
@@ -125,7 +125,7 @@ describe('GoogleJwksVerifier', () => {
     });
   });
 
-  it('accepts email_verified as the string older tokens carry', async () => {
+  it('accepts email_verified as a string', async () => {
     await expect(
       verifier.verify(token({ ...CLAIMS, email_verified: 'true' })),
     ).resolves.toMatchObject({ outcome: 'verified' });
@@ -164,7 +164,7 @@ describe('GoogleJwksVerifier', () => {
 
     it('refetches for a new kid, but not within five minutes of the last fetch', async () => {
       await verifier.verify(token());
-      keySet = { keys: [google.jwk, rotatedIn.jwk], maxAgeSeconds: 3600 };
+      keySet = { keys: [provider.jwk, rotatedIn.jwk], maxAgeSeconds: 3600 };
       const k2 = token(CLAIMS, { keyid: 'k2' }, rotatedIn.privateKey);
 
       await expect(verifier.verify(k2)).resolves.toEqual({
