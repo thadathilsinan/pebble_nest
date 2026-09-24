@@ -1,5 +1,5 @@
 import type { Recurrence } from '../calendar/recurrence';
-import type { BlockSeriesRow } from '../core/database/schema';
+import type { BlockSeriesRow, ChosenTrace } from '../core/database/schema';
 import type { Task } from '../tasks/tasks.mapper';
 
 /** `BlockOccurrence` in `docs/api-plan.md` §1: one series on one date. */
@@ -15,7 +15,7 @@ export interface BlockOccurrence {
   skipped: boolean;
   recurrence: Recurrence;
   /** The user's chosen fill pattern for this name; null is the name's default. */
-  trace: string | null;
+  trace: ChosenTrace | null;
   /** The tail of yesterday's midnight-crossing block. */
   continuedFromPreviousDay: boolean;
   /** In the order the app shows them (`compareTasks`). */
@@ -42,10 +42,13 @@ export function recurrenceOf(row: BlockSeriesRow): Recurrence {
  * `continuedFromPreviousDay` marks the copy of yesterday's midnight-crossing
  * occurrence that a day's timeline shows as its tail (BLK-04). `date` is still
  * the day it starts.
+ *
+ * `trace` is the one chosen for the series' name, or null for its default.
  */
 export function toBlockOccurrence(
   row: BlockSeriesRow,
   date: string,
+  trace: ChosenTrace | null,
   continuedFromPreviousDay = false,
   tasks: Task[] = [],
 ): BlockOccurrence {
@@ -59,9 +62,7 @@ export function toBlockOccurrence(
     alert: row.alert,
     skipped: false,
     recurrence: recurrenceOf(row),
-    // Chosen traces are stored with `PUT /block-names/{name}/trace`, which
-    // does not exist yet.
-    trace: null,
+    trace,
     continuedFromPreviousDay,
     tasks,
     openCount: tasks.filter((task) => !task.done).length,

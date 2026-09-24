@@ -43,6 +43,13 @@
       "when": 1790227615942,
       "tag": "20260924052655_tasks",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790244680834,
+      "tag": "20260924101120_block_name_traces",
+      "breakpoints": true
     }
   ]
 }

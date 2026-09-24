@@ -187,8 +187,8 @@ Screens: block slip, block sheet.
 | DELETE | `/blocks/{seriesId}/occurrences/{date}` | `?scope=onlyThis\|series` | `{ movedTaskCount }` (200) |
 | POST | `/blocks/{seriesId}/occurrences/{date}/skip` | — | `{ movedTaskCount }` |
 | DELETE | `/blocks/{seriesId}/occurrences/{date}/skip` | — | 204 |
-| GET | `/block-names` | `?q=` | `{ items: [string] }` |
-| PUT | `/block-names/{name}/trace` | `{ trace }` | 204 |
+| GET | `/block-names` | `?q=` | `{ items: [string] }`. **Built.** See below. |
+| PUT | `/block-names/{name}/trace` | `{ trace }` | 204. **Built.** See below. |
 
 - **Validation:** name is 1–60 characters after trimming. Length is at least 5
   minutes, otherwise `422 BLOCK_TOO_SHORT` (BLK-05). `endMin = startMin` is a full
@@ -207,7 +207,7 @@ Screens: block slip, block sheet.
   created on a Wednesday answers with the next Monday (decision 20). A repeat
   whose `until` comes before its first occurrence is
   `422 BLOCK_NO_OCCURRENCE`. The occurrence carries
-  `tasks: []`, and `trace: null` until that slice exists. It does not read the
+  `tasks: []`, and the trace chosen for its name. It does not read the
   session (decision 16).
 - **Edit scope** is `onlyThis` or `thisAndFuture`, and is ignored for a
   non-repeating block. `recurrence` is accepted only with `thisAndFuture`. Past
@@ -231,13 +231,27 @@ Screens: block slip, block sheet.
 - **Skip:** open tasks move to the general list, and repeating ones split off as
   one-offs (BLK-07). Un-skipping restores the status; tasks already moved stay
   where they are (BLK-08).
-- **`GET /block-names`:** names used before, matched ignoring case and surrounding
-  spaces, most recently used first, at most 6 (BLK-02).
-- **`PUT /block-names/{name}/trace`:** the fill pattern chosen by rerolling in the
-  block slip. It is stored against the normalised name, so every block with that
-  name changes, past and future included. The value is one of: `solid`, `ruled`,
-  `verticalRuled`, `grid`, `stipple`, `dotted`, `dashed`, `checker`. Sending the
-  name's default pattern clears the choice.
+- **`GET /block-names` (built):** names used before, most recently used first,
+  at most 6 (BLK-02). One entry per name ignoring capitals and surrounding
+  spaces, spelt as the most recently created block spelt it. "Recently used" is
+  when the block series was created. `q` is trimmed and matched ignoring
+  capitals **anywhere** in the name; the name `q` already is is left out, and a
+  blank or absent `q` lists the most recent names, all as the app's
+  `nameSuggestions` does. A `q` over 60 characters is `400 VALIDATION_FAILED`.
+  Every series counts, ended ones included. The list is capped rather than
+  cursor-paginated. It does not read the session (decision 16).
+- **`PUT /block-names/{name}/trace` (built):** the fill pattern chosen by
+  rerolling in the block slip. It is stored against the normalised name
+  (trimmed, lower-cased), so every block with that name changes, past and
+  future included, and `trace` on every `BlockOccurrence` carries it; `null`
+  means the name's default. The name needn't belong to a block yet, since the
+  slip rerolls before saving. The value is one of: `solid`, `ruled`,
+  `verticalRuled`, `grid`, `stipple`, `dotted`, `dashed`, `checker`; `open`
+  and anything else are `400 VALIDATION_FAILED`, as are a blank name or one
+  over 60 characters. A name containing `/` is sent percent-encoded. Sending
+  the name's default pattern clears the choice: the server computes it with the
+  app's hash (decision 27). No `version`: last write wins. A deleted account's
+  token gets `401 TOKEN_INVALID`. It does not read the session (decision 16).
 
 ## 5. Tasks (TSK, REC-05)
 
@@ -509,6 +523,7 @@ request turns out to be slow.
 | 24 | `PATCH /tasks/{id}/done` carries no `version` and is last-write-wins, since `done` is an absolute value. The `completed` ledger entry is written on the tick itself, not when the day closes, matching the app. Reopening on a closed day carries the task at once (decision 2). |
 | 25 | Renaming a task renames its ledger entries too, past days included, so the history shows the task's current title. This departs from the app, which keeps the title each entry was written with. `PATCH /tasks/{id}` reads no user row, so a deleted account's token gets 404 there. |
 | 26 | `POST /tasks/{id}/move` carries no `version` and is last-write-wins, like `/done`. A done task's `completed` entry moves with it. An open task moved onto a closed day carries forward at once (decision 2). A closed day that already recorded the task keeps its entry (`ON CONFLICT DO NOTHING`), and `carryCount` counts the carry again. `DELETE /tasks/{id}` ignores `scope` for a one-off, as the app does, and gets 404 on a retry. |
+| 27 | Block-name traces live in `block_name_traces`, keyed by the name trimmed and lower-cased in JavaScript, with no `version`. The server ports the app's default-trace hash (32-bit FNV-1a over UTF-16 code units, modulo the app's 9 traces; `src/block-names/block-name.ts`), so choosing the default deletes the row, as the app's `chooseTraceForName` does. A name whose default is `open` keeps any choice once made, as in the app. `PUT` is kept over the `PATCH` that adding-a-feature §4.4 prefers, since each request replaces the whole resource. JavaScript and Dart lower-case a few characters differently; that is accepted. `GET /block-names` counts every series, ended ones included. |
 
 ## 11. Error codes to add
 

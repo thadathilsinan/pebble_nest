@@ -522,3 +522,75 @@ export const taskLedgerEntries = pgTable(
 );
 
 export type TaskLedgerEntryRow = typeof taskLedgerEntries.$inferSelect;
+
+/**
+ * The fill patterns a user can choose for a block name by rerolling in the
+ * block slip. The UI's `open` trace is left out: it is how the review draws
+ * skipped hours, so a reroll never picks it, though a name can hash to it.
+ */
+export const CHOSEN_TRACES = [
+  'solid',
+  'ruled',
+  'verticalRuled',
+  'grid',
+  'stipple',
+  'dotted',
+  'dashed',
+  'checker',
+] as const;
+
+export type ChosenTrace = (typeof CHOSEN_TRACES)[number];
+
+/**
+ * A trace chosen for a block name (`PUT /block-names/{name}/trace`), which
+ * every block of that name is drawn in, past and future. A name with no row
+ * is drawn in the trace its name hashes to.
+ *
+ * No `version` or `idempotency_key`: a PUT sets an absolute value, so the last
+ * write wins and a retry is harmless.
+ */
+export const blockNameTraces = pgTable(
+  'block_name_traces',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`uuidv7()`),
+    userId: uuid('user_id').notNull(),
+    // The name trimmed and lower-cased (BLK-02): "Family" and " family " are
+    // one name.
+    nameKey: text('name_key').notNull(),
+    trace: text('trace', { enum: CHOSEN_TRACES }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Cascade: decision 18 — DELETE /me stays a single delete.
+    foreignKey({
+      name: 'fk_block_name_traces_user_id',
+      columns: [table.userId],
+      foreignColumns: [users.id],
+    }).onDelete('cascade'),
+    // One choice per name. It leads with `user_id`, so it is also that
+    // foreign key's index (schema-conventions §6).
+    uniqueIndex('uq_block_name_traces_user_id_name_key').on(
+      table.userId,
+      table.nameKey,
+    ),
+    // The same bounds as a block's name. Lower-casing is the application's
+    // job: SQL's `lower()` and JavaScript's disagree on a few characters.
+    check(
+      'ck_block_name_traces_name_key_length',
+      sql`char_length(${table.nameKey}) BETWEEN 1 AND 60 AND ${table.nameKey} = btrim(${table.nameKey})`,
+    ),
+    check(
+      'ck_block_name_traces_trace',
+      oneOf(sql`${table.trace}`, CHOSEN_TRACES),
+    ),
+  ],
+);
+
+export type BlockNameTraceRow = typeof blockNameTraces.$inferSelect;

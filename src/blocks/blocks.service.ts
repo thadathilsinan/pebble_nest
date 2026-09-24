@@ -4,6 +4,12 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
+import {
+  chosenTraceFor,
+  normaliseBlockName,
+  tracesByName,
+} from '../block-names/block-name';
+import { BlockNamesRepository } from '../block-names/block-names.repository';
 import { firstOccurrenceFrom, resolveRecurrence } from '../calendar/recurrence';
 import { DB, type Db } from '../core/database/database.module';
 import type { BlockSeriesRow } from '../core/database/schema';
@@ -24,6 +30,7 @@ export class BlocksService {
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly blocks: BlocksRepository,
+    private readonly names: BlockNamesRepository,
   ) {}
 
   /**
@@ -73,7 +80,14 @@ export class BlocksService {
 
     // Recomputed from the row, not the body: a replay returns the series the
     // first request stored, whatever the retry sent.
-    return toBlockOccurrence(row, firstOccurrenceOf(row));
+    const traces = await this.names.findTraces(this.db, caller.userId, [
+      normaliseBlockName(row.name),
+    ]);
+    return toBlockOccurrence(
+      row,
+      firstOccurrenceOf(row),
+      chosenTraceFor(tracesByName(traces), row.name),
+    );
   }
 }
 

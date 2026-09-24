@@ -1,5 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
+import { chosenTraceFor, tracesByName } from '../block-names/block-name';
+import { BlockNamesRepository } from '../block-names/block-names.repository';
 import { addDays } from '../calendar/local-date';
 import { occursOn } from '../calendar/recurrence';
 import {
@@ -9,7 +11,7 @@ import {
 } from '../blocks/blocks.mapper';
 import { BlocksRepository } from '../blocks/blocks.repository';
 import { DB, type Db } from '../core/database/database.module';
-import type { BlockSeriesRow } from '../core/database/schema';
+import type { BlockSeriesRow, ChosenTrace } from '../core/database/schema';
 import { compareTasks, toTask, type Task } from '../tasks/tasks.mapper';
 import { TasksRepository } from '../tasks/tasks.repository';
 
@@ -28,28 +30,31 @@ export class DaysService {
     @Inject(DB) private readonly db: Db,
     private readonly blocks: BlocksRepository,
     private readonly tasks: TasksRepository,
+    private readonly names: BlockNamesRepository,
   ) {}
 
   /**
-   * Every day from `from` to `to`, both included, from one read of the
-   * caller's series and one of their tasks. It does not read the session
+   * Every day from `from` to `to`, both included, from one read each of the
+   * caller's series, their tasks and their chosen traces. It does not read the session
    * (decision 16).
    */
   async list(caller: Caller, from: string, to: string): Promise<Day[]> {
     // The day before `from`, for the tails of blocks that began then and the
     // tasks those tails hold.
     const since = addDays(from, -1);
-    const [rows, taskRows] = await Promise.all([
+    const [rows, taskRows, traceRows] = await Promise.all([
       this.blocks.findActiveBetween(this.db, caller.userId, since, to),
       this.tasks.findBetween(this.db, caller.userId, since, to),
+      this.names.findTraces(this.db, caller.userId),
     ]);
     const tasks = groupTasks(taskRows.map(toTask));
+    const traces = tracesByName(traceRows);
 
     const days: Day[] = [];
     for (let date = from; date <= to; date = addDays(date, 1)) {
       days.push({
         date,
-        blocks: blocksOn(rows, date, tasks),
+        blocks: blocksOn(rows, date, tasks, traces),
         generalList: tasks.get(slot(null, date)) ?? [],
       });
     }
@@ -87,12 +92,14 @@ function blocksOn(
   rows: BlockSeriesRow[],
   date: string,
   tasks: Map<string, Task[]>,
+  traces: ReadonlyMap<string, ChosenTrace>,
 ): BlockOccurrence[] {
   const yesterday = addDays(date, -1);
   const out: BlockOccurrence[] = [];
 
   for (const row of rows) {
     const recurrence = recurrenceOf(row);
+    const trace = chosenTraceFor(traces, row.name);
     if (
       crossesMidnight(row) &&
       row.endMin > 0 &&
@@ -100,11 +107,11 @@ function blocksOn(
     ) {
       // A tail holds the tasks of the occurrence it ends, as the app shows.
       const held = tasks.get(slot(row.id, yesterday)) ?? [];
-      out.push(toBlockOccurrence(row, yesterday, true, held));
+      out.push(toBlockOccurrence(row, yesterday, trace, true, held));
     }
     if (occursOn(recurrence, row.anchorDate, date)) {
       const held = tasks.get(slot(row.id, date)) ?? [];
-      out.push(toBlockOccurrence(row, date, false, held));
+      out.push(toBlockOccurrence(row, date, trace, false, held));
     }
   }
 
