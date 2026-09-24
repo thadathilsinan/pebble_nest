@@ -128,6 +128,18 @@ export class UsersRepository {
     return row ?? (await this.findById(ex, id));
   }
 
+  /**
+   * Hard-deletes the account (ACC-06). Its sessions and their retired tokens
+   * go with it through the cascades on `sessions` and
+   * `session_refresh_tokens`. Returns the deleted row so the caller can clean up
+   * what is keyed by email, or `null` when there was no such account.
+   */
+  async deleteById(ex: Executor, id: string): Promise<UserRow | null> {
+    const [row] = await ex.delete(users).where(eq(users.id, id)).returning();
+
+    return row ?? null;
+  }
+
   async findById(ex: Executor, id: string): Promise<UserRow | null> {
     const [row] = await ex
       .select()

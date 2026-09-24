@@ -155,4 +155,15 @@ describe('SignInCodesRepository (integration)', () => {
     expect(seen.map((s) => s.before).sort()).toEqual([0, 1]);
     expect(seen.map((s) => s.after).sort()).toEqual([1, 2]);
   });
+
+  it('deletes only the row for the given email', async () => {
+    await repo.issue(t.db, EMAIL, 'h1', LIMITS);
+    await repo.issue(t.db, 'other@example.com', 'h2', LIMITS);
+
+    await repo.deleteByEmail(t.db, EMAIL);
+
+    expect(await row()).toEqual([
+      { code_hash: 'h2', attempts: 0, sends_in_window: 1 },
+    ]);
+  });
 });

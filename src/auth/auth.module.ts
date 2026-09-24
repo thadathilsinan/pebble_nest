@@ -41,7 +41,8 @@ import { SignInCodesRepository } from './sign-in-codes.repository';
     // depends on `AccessTokensService`, which lives here.
     { provide: APP_GUARD, useClass: AuthGuard },
   ],
-  // For `GET /me`, which reads the caller's session.
-  exports: [SessionsRepository],
+  // For `/me`: every method reads the caller's session, and `DELETE /me`
+  // removes the account's sign-in code row.
+  exports: [SessionsRepository, SignInCodesRepository],
 })
 export class AuthModule {}

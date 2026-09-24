@@ -2,7 +2,8 @@ import { ConflictException, Inject, Injectable } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
 import { accessTokenInvalid } from '../auth/errors';
 import { SessionsRepository } from '../auth/sessions.repository';
-import { DB, type Db } from '../database/database.module';
+import { SignInCodesRepository } from '../auth/sign-in-codes.repository';
+import { DB, type Db, type Executor } from '../database/database.module';
 import type { SessionRow } from '../database/schema';
 import type { ErrorCode } from '../http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
@@ -17,6 +18,7 @@ export class MeService {
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly sessions: SessionsRepository,
+    private readonly signInCodes: SignInCodesRepository,
     private readonly users: UsersRepository,
   ) {}
 
@@ -30,7 +32,7 @@ export class MeService {
    * them, the user read finds nothing, and that is a 401 too.
    */
   async get(caller: Caller): Promise<Profile> {
-    const session = await this.liveSession(caller);
+    const session = await this.liveSession(this.db, caller);
 
     const user = await this.users.findById(this.db, caller.userId);
     if (user === null) throw accessTokenInvalid();
@@ -48,7 +50,7 @@ export class MeService {
    * without another read.
    */
   async update(caller: Caller, body: UpdateProfileBody): Promise<Profile> {
-    const session = await this.liveSession(caller);
+    const session = await this.liveSession(this.db, caller);
 
     if (isTimeZoneOnly(body)) {
       const user = await this.users.setTimeZone(
@@ -88,8 +90,33 @@ export class MeService {
     }
   }
 
-  private async liveSession(caller: Caller): Promise<SessionRow> {
-    const session = await this.sessions.findLiveById(this.db, caller.sessionId);
+  /**
+   * Hard-deletes the caller's account and everything in it (ACC-06, decision
+   * 8). The cascades from `users` remove every device's session. The sign-in
+   * code row is keyed by email, not by user, so it is deleted here by hand.
+   *
+   * It needs a live session, like `get` and `update`: a signed-out device's
+   * access token, still inside its 15 minutes, must not be able to do the most
+   * destructive thing there is. A retry after a lost response therefore gets
+   * a 401, because the session went with the account (decision 18).
+   *
+   * Every user-owned table must cascade from `users`, so that this stays one
+   * delete. Sign in with Apple token revocation joins this method with the
+   * Apple sign-in slice.
+   */
+  async delete(caller: Caller): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await this.liveSession(tx, caller);
+
+      const user = await this.users.deleteById(tx, caller.userId);
+      if (user === null) throw accessTokenInvalid();
+
+      await this.signInCodes.deleteByEmail(tx, user.email);
+    });
+  }
+
+  private async liveSession(ex: Executor, caller: Caller): Promise<SessionRow> {
+    const session = await this.sessions.findLiveById(ex, caller.sessionId);
     if (session === null || session.userId !== caller.userId) {
       throw accessTokenInvalid();
     }

@@ -370,6 +370,92 @@ describe('Auth guard and /me (e2e)', () => {
     });
   });
 
+  describe('DELETE /me', () => {
+    function deleteMe(session: SessionBody['data']) {
+      return http()
+        .delete('/api/v1/me')
+        .set('Authorization', `Bearer ${session.accessToken}`);
+    }
+
+    async function count(table: string): Promise<number> {
+      const { rows } = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ${table}`,
+      );
+      return rows[0]?.n ?? 0;
+    }
+
+    it('deletes the account and every device’s session', async () => {
+      const session = await signIn();
+      // A second device: the code's cooldown has to pass before another send.
+      await pool.query(
+        "UPDATE email_sign_in_codes SET last_sent_at = now() - interval '1 minute'",
+      );
+      const other = await signIn();
+
+      const res = await deleteMe(session).expect(204);
+
+      expect(res.text).toBe('');
+      expect(await count('users')).toBe(0);
+      expect(await count('sessions')).toBe(0);
+      expect(await count('email_sign_in_codes')).toBe(0);
+      await http()
+        .post('/api/v1/auth/refresh')
+        .send({ refreshToken: other.refreshToken })
+        .expect(401);
+    });
+
+    it('leaves other accounts alone', async () => {
+      const session = await signIn();
+      await http()
+        .post('/api/v1/auth/email/code')
+        .send({ email: 'other@example.com' })
+        .expect(204);
+      await http()
+        .post('/api/v1/auth/email/verify')
+        .send({
+          email: 'other@example.com',
+          code: mailer.lastCodeFor('other@example.com'),
+        })
+        .expect(200);
+
+      await deleteMe(session).expect(204);
+
+      const { rows } = await pool.query<{ email: string }>(
+        'SELECT email FROM users',
+      );
+      expect(rows).toEqual([{ email: 'other@example.com' }]);
+      expect(await count('sessions')).toBe(1);
+      expect(await count('email_sign_in_codes')).toBe(1);
+    });
+
+    it('answers a retry with 401, since the session went with the account', async () => {
+      const session = await signIn();
+      await deleteMe(session).expect(204);
+
+      expectTokenInvalid(await deleteMe(session).expect(401));
+    });
+
+    it('opens a fresh account when the same email signs in again', async () => {
+      const session = await signIn();
+      await deleteMe(session).expect(204);
+
+      const again = await signIn();
+
+      expect(again.profile.id).not.toBe(session.profile.id);
+    });
+
+    it('refuses a still-valid access token once its session is signed out', async () => {
+      const session = await signIn();
+      await http()
+        .post('/api/v1/auth/sign-out')
+        .send({ refreshToken: session.refreshToken })
+        .expect(204);
+
+      expectTokenInvalid(await deleteMe(session).expect(401));
+      expect(await count('users')).toBe(1);
+    });
+  });
+
   it('leaves the auth and health routes open', async () => {
     await http()
       .post('/api/v1/auth/email/code')

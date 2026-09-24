@@ -169,4 +169,13 @@ export class SignInCodesRepository {
       .set({ expiresAt: sql`now()` })
       .where(eq(emailSignInCodes.id, id));
   }
+
+  /**
+   * Removes the row for `email`, send counters included. Only `DELETE /me`
+   * does this (ACC-06: every trace of the account goes). It resets the email's
+   * send rate limit, which is an accepted cost.
+   */
+  async deleteByEmail(ex: Executor, email: string): Promise<void> {
+    await ex.delete(emailSignInCodes).where(eq(emailSignInCodes.email, email));
+  }
 }

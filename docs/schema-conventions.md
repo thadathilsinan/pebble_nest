@@ -343,6 +343,14 @@ invisible: one `DELETE` removes an amount of data nobody can see from the
 statement, and it keeps working right up until a fourth table joins the chain.
 `set null` requires a nullable column and therefore needs a reason twice over.
 
+**In this service, user-owned data is composition.** `DELETE /me` (ACC-06) is a
+hard delete of the account, and it removes everything by deleting the `users`
+row. So every table that holds a user's data must reach `users` through a chain
+of `cascade` keys. A `no action` link anywhere on that chain makes account
+deletion fail with a foreign key violation. Data keyed by something other than a
+user id (today, only `email_sign_in_codes`, keyed by email) is not reached by the
+cascade, and `MeService.delete` removes it by hand.
+
 Declaring `onDelete` even when it matches the default is the same argument as
 naming constraints: an absent clause is ambiguous between "chose the default" and
 "never thought about it", and only one of those survives review.

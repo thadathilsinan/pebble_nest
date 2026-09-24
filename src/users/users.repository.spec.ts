@@ -1,9 +1,11 @@
 import { openTestDatabase, type TestDatabase } from '../database/testing';
+import { SessionsRepository } from '../auth/sessions.repository';
 import { UsersRepository } from './users.repository';
 
 describe('UsersRepository (integration)', () => {
   let t: TestDatabase;
   const repo = new UsersRepository();
+  const sessions = new SessionsRepository();
 
   beforeAll(async () => {
     t = await openTestDatabase();
@@ -160,6 +162,48 @@ describe('UsersRepository (integration)', () => {
           '01900000-0000-7000-8000-000000000000',
           'Asia/Kolkata',
         ),
+      ).resolves.toBeNull();
+    });
+  });
+
+  describe('deleteById', () => {
+    it('deletes the account with its sessions and retired tokens', async () => {
+      const { row } = await repo.findOrCreateByEmail(t.db, 'me@example.com');
+      const other = await repo.findOrCreateByEmail(t.db, 'other@example.com');
+      const session = await sessions.create(t.db, {
+        userId: row.id,
+        signInMethod: 'email',
+        refreshTokenHash: 'h1',
+        ttlDays: 60,
+      });
+      await t.db.transaction(async (tx) => {
+        const locked = await sessions.lockByTokenHash(tx, 'h1');
+        await sessions.rotate(tx, locked!, 'h2', 60);
+      });
+      await sessions.create(t.db, {
+        userId: other.row.id,
+        signInMethod: 'email',
+        refreshTokenHash: 'other',
+        ttlDays: 60,
+      });
+
+      await expect(repo.deleteById(t.db, row.id)).resolves.toMatchObject({
+        id: row.id,
+        email: 'me@example.com',
+      });
+
+      await expect(repo.findById(t.db, row.id)).resolves.toBeNull();
+      await expect(sessions.findLiveById(t.db, session.id)).resolves.toBeNull();
+      const { rows } = await t.pool.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM session_refresh_tokens',
+      );
+      expect(rows).toEqual([{ n: 0 }]);
+      await expect(repo.findById(t.db, other.row.id)).resolves.not.toBeNull();
+    });
+
+    it('returns null for an unknown id', async () => {
+      await expect(
+        repo.deleteById(t.db, '01900000-0000-7000-8000-000000000000'),
       ).resolves.toBeNull();
     });
   });
