@@ -50,28 +50,71 @@ export class DaysService {
     // The day before `from`, for the tails of blocks that began then and the
     // tasks those tails hold.
     const since = addDays(from, -1);
-    const [rows, taskRows, traceRows, exceptionRows] = await Promise.all([
-      this.blocks.findActiveBetween(this.db, caller.userId, since, to),
+    const [taskRows, blocks] = await Promise.all([
       this.tasks.findBetween(this.db, caller.userId, since, to),
-      this.names.findTraces(this.db, caller.userId),
-      this.occurrences.findBetween(this.db, caller.userId, since, to),
+      this.readBlocks(caller, since, to),
     ]);
     const tasks = groupTasks(taskRows.map(toTask));
-    const traces = tracesByName(traceRows);
-    const exceptions = new Map(
-      exceptionRows.map((row) => [slot(row.blockSeriesId, row.date), row]),
-    );
 
     const days: Day[] = [];
     for (let date = from; date <= to; date = addDays(date, 1)) {
       days.push({
         date,
-        blocks: blocksOn(rows, date, tasks, traces, exceptions),
+        blocks: blocksOn(blocks, date, tasks),
         generalList: tasks.get(slot(null, date)) ?? [],
       });
     }
     return days;
   }
+
+  /**
+   * The blocks of every day from `from` to `to`, as `list` lays them out but
+   * without reading a task, so each occurrence's `tasks` is empty. For reads
+   * over ranges too long to load every task in, like `GET /review`.
+   */
+  async listBlocks(
+    caller: Caller,
+    from: string,
+    to: string,
+  ): Promise<DayBlocks[]> {
+    const blocks = await this.readBlocks(caller, addDays(from, -1), to);
+    const none = new Map<string, Task[]>();
+
+    const days: DayBlocks[] = [];
+    for (let date = from; date <= to; date = addDays(date, 1)) {
+      days.push({ date, blocks: blocksOn(blocks, date, none) });
+    }
+    return days;
+  }
+
+  /** The caller's series, chosen traces and exceptions from `since` to `to`. */
+  private async readBlocks(
+    caller: Caller,
+    since: string,
+    to: string,
+  ): Promise<BlockReads> {
+    const [rows, traceRows, exceptionRows] = await Promise.all([
+      this.blocks.findActiveBetween(this.db, caller.userId, since, to),
+      this.names.findTraces(this.db, caller.userId),
+      this.occurrences.findBetween(this.db, caller.userId, since, to),
+    ]);
+    return {
+      rows,
+      traces: tracesByName(traceRows),
+      exceptions: new Map(
+        exceptionRows.map((row) => [slot(row.blockSeriesId, row.date), row]),
+      ),
+    };
+  }
+}
+
+/** A day's blocks alone: `Day` without its general list. */
+export type DayBlocks = Pick<Day, 'date' | 'blocks'>;
+
+interface BlockReads {
+  rows: BlockSeriesRow[];
+  traces: ReadonlyMap<string, ChosenTrace>;
+  exceptions: ReadonlyMap<string, BlockOccurrenceExceptionRow>;
 }
 
 /**
@@ -104,11 +147,9 @@ function groupTasks(tasks: Task[]): Map<string, Task[]> {
  * along with its tail.
  */
 function blocksOn(
-  rows: BlockSeriesRow[],
+  { rows, traces, exceptions }: BlockReads,
   date: string,
-  tasks: Map<string, Task[]>,
-  traces: ReadonlyMap<string, ChosenTrace>,
-  exceptions: ReadonlyMap<string, BlockOccurrenceExceptionRow>,
+  tasks: ReadonlyMap<string, Task[]>,
 ): BlockOccurrence[] {
   const yesterday = addDays(date, -1);
   const out: BlockOccurrence[] = [];
