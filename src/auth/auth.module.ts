@@ -14,7 +14,8 @@ import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { GOOGLE_ID_TOKENS, googleIdTokens } from './google/google-id-tokens';
 import { LogMailer } from './mailer/log-mailer';
-import { MAILER } from './mailer/mailer';
+import { MAILER, type Mailer } from './mailer/mailer';
+import { ResendMailer } from './mailer/resend-mailer';
 import { SessionsRepository } from './sessions.repository';
 import { SignInCodesRepository } from './sign-in-codes.repository';
 
@@ -49,9 +50,18 @@ const appleNotSetUp: AppleTokens = {
     AccessTokensService,
     SignInCodesRepository,
     SessionsRepository,
-    // `MAILER=log` is the only value env.schema.ts accepts today. A real
-    // provider becomes a `useFactory` switching on `env.MAILER`.
-    { provide: MAILER, useClass: LogMailer },
+    LogMailer,
+    {
+      provide: MAILER,
+      inject: [ENV, LogMailer],
+      useFactory: (env: Env, log: LogMailer): Mailer =>
+        env.MAILER === 'resend'
+          ? new ResendMailer({
+              apiKey: env.RESEND_API_KEY,
+              from: env.MAIL_FROM,
+            })
+          : log,
+    },
     // One instance for the process, so Google's keys are fetched once and
     // shared by every request.
     {

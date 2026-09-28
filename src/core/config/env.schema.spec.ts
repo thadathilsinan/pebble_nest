@@ -84,3 +84,32 @@ describe('envSchema: Sign in with Apple', () => {
     expect(issuesFor(production)).not.toContain('APPLE_CLIENT_IDS');
   });
 });
+
+describe('envSchema: mailer', () => {
+  const RESEND = {
+    MAILER: 'resend',
+    RESEND_API_KEY: 're_key',
+    MAIL_FROM: 'Pebble <signin@pebble.app>',
+  };
+
+  it('reads the Resend settings', () => {
+    expect(envSchema.parse({ ...BASE, ...RESEND })).toMatchObject(RESEND);
+  });
+
+  it.each(['RESEND_API_KEY', 'MAIL_FROM'])(
+    'refuses MAILER=resend without %s',
+    (missing) => {
+      expect(issuesFor({ ...RESEND, [missing]: '' })).toEqual([missing]);
+    },
+  );
+
+  it('refuses the log mailer in production, and accepts Resend there', () => {
+    const production = {
+      NODE_ENV: 'production',
+      GOOGLE_CLIENT_IDS: 'ios-client',
+    };
+
+    expect(issuesFor(production)).toEqual(['MAILER']);
+    expect(issuesFor({ ...production, ...RESEND })).toEqual([]);
+  });
+});

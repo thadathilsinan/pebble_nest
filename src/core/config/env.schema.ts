@@ -295,12 +295,20 @@ export const envSchema = z
     /**
      * Where sign-in codes are sent.
      *
-     * `log` writes the code to the application log and sends nothing. It is the
-     * only mailer until a provider is chosen (api-plan §13), and it is refused in
-     * production below: there it would put working sign-in codes in the logs and
-     * leave every user unable to sign in.
+     * `log` writes the code to the application log and sends nothing, for local
+     * development. It is refused in production below: there it would put
+     * working sign-in codes in the logs and leave every user unable to sign in.
+     * `resend` sends them through Resend, with the two settings below.
      */
-    MAILER: z.enum(['log']).default('log'),
+    MAILER: z.enum(['log', 'resend']).default('log'),
+    /** Resend's API key. Required with `MAILER=resend`. */
+    RESEND_API_KEY: z.string().trim().default(''),
+    /**
+     * Who sign-in codes come from, as `Pebble <signin@example.com>` or a bare
+     * address. The domain must be verified in Resend, or it refuses every
+     * send. Required with `MAILER=resend`.
+     */
+    MAIL_FROM: z.string().trim().default(''),
     /**
      * The OAuth client IDs whose Google ID tokens `POST /auth/google` accepts,
      * comma-separated: one each for iOS, Android and web. A token's `aud` must
@@ -362,6 +370,17 @@ export const envSchema = z
         message:
           'The log mailer writes sign-in codes to the log and sends no email. Configure a real provider before running in production',
       });
+    }
+
+    if (env.MAILER === 'resend') {
+      for (const name of ['RESEND_API_KEY', 'MAIL_FROM'] as const) {
+        if (env[name] !== '') continue;
+        ctx.addIssue({
+          code: 'custom',
+          path: [name],
+          message: 'Required with MAILER=resend',
+        });
+      }
     }
 
     if (env.NODE_ENV === 'production' && env.GOOGLE_CLIENT_IDS.length === 0) {

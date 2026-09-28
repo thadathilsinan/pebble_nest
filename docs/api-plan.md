@@ -791,8 +791,9 @@ These decisions add behaviour the UI doesn't have yet:
 
 ## 13. Still to set up (not blocking)
 
-- A transactional email provider for sign-in codes. Until then `MAILER=log` writes
-  codes to the log, and the service refuses to start with it in production.
+- Resend, for sign-in codes: an API key and a verified sending domain, set as
+  `MAILER=resend`, `RESEND_API_KEY` and `MAIL_FROM`. `MAILER=log` writes codes
+  to the log instead, and the service refuses to start with it in production.
 - Google OAuth client IDs for iOS, Android and web, set as `GOOGLE_CLIENT_IDS`.
   Until then `POST /auth/google` answers 503.
 - Apple: the bundle ID(s), Team ID, and a Sign in with Apple key's ID and `.p8`
