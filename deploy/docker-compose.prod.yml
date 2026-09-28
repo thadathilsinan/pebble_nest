@@ -1,0 +1,62 @@
+# Production, on a single VPS. Not run by hand: `deploy/deploy.sh` copies the
+# repository to the server and runs this file there, as
+#
+#   docker compose -f /opt/pebble/app/deploy/docker-compose.prod.yml \
+#     --env-file /opt/pebble/.env up -d --build --wait
+#
+# The images are built on the server, from the committed source, so there is no
+# registry and no cross-architecture build.
+#
+# `/opt/pebble/.env` holds every secret and lives outside `app/`, which each
+# deploy replaces. Its template is `deploy/production.env.example`.
+
+# Fixed, because the directory this file sits in is replaced on every deploy and
+# the containers and volumes must still be recognised as the same project.
+name: pebble
+
+services:
+  # The database is Neon, not a container here: DATABASE_URL in
+  # /opt/pebble/.env points at it.
+
+  # Runs to completion on every deploy, before `api` is replaced. The deploy
+  # script is the only thing that runs it, one deploy at a time.
+  migrate:
+    build:
+      context: ..
+      target: migrate
+    env_file: ../../.env
+
+  api:
+    build:
+      context: ..
+      target: runtime
+    restart: unless-stopped
+    env_file: ../../.env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # No `ports`: Caddy is the only way in. `trust proxy` is 1 in
+    # `configure-app.ts`, which matches this single hop.
+
+  # HTTPS in front of the API. Caddy gets and renews the Let's Encrypt
+  # certificate for DOMAIN by itself, which needs DOMAIN's DNS pointing at this
+  # server and ports 80 and 443 open.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${DOMAIN:?set DOMAIN in /opt/pebble/.env} --to api:3000
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      # The certificates. Losing them means asking Let's Encrypt again, which
+      # rate-limits repeated requests for the same domain.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -107,6 +107,22 @@ Point the platform's health checks at:
 - `GET /health/live` — liveness (the image's own `HEALTHCHECK` uses this)
 - `GET /health/ready` — readiness; fails while the database is unreachable
 
+### To a VPS
+
+`deploy/deploy.sh` deploys to any Linux server you can SSH into (a Hostinger
+VPS, for example) with no registry or CI. The server runs the API and Caddy
+for HTTPS, from `deploy/docker-compose.prod.yml`; the database is Neon.
+
+```bash
+$ export PEBBLE_HOST=root@<vps-ip>
+$ ./deploy/deploy.sh setup                  # once: installs Docker
+$ ./deploy/deploy.sh env production.env     # once: from deploy/production.env.example
+$ ./deploy/deploy.sh                        # every deploy: HEAD → build → migrate → API
+```
+
+Also `status` and `logs [service]`.
+Point the domain in `DOMAIN` at the VPS before the first deploy.
+
 To check the image locally, the `app` profile builds it, migrates the compose
 database, and serves it on port 3001:
 

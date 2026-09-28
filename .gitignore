@@ -7,6 +7,8 @@
 # the root, and it is a machine-specific artifact either way.
 *.tsbuildinfo
 
+.production.env
+
 # Logs
 logs
 *.log
