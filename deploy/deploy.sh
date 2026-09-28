@@ -59,13 +59,16 @@ case "${1:-deploy}" in
 
     ssh "$HOST" "set -e
       $COMPOSE up -d --build --wait --remove-orphans
-      docker image prune -f >/dev/null"
+      # The images this deploy replaced, and build cache older than a week.
+      # A week of cache keeps the next build fast; everything older only grows.
+      docker image prune -f >/dev/null
+      docker builder prune -f --filter until=168h >/dev/null"
 
     echo "Deployed $rev."
     ;;
 
   status)
-    ssh "$HOST" "echo \"Deployed: \$(cat $DIR/app/REVISION)\"; $COMPOSE ps"
+    ssh "$HOST" "echo \"Deployed: \$(cat $DIR/app/REVISION)\"; $COMPOSE ps; echo; docker system df; echo; df -h /"
     ;;
 
   logs)

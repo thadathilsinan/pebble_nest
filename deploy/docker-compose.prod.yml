@@ -14,6 +14,14 @@
 # the containers and volumes must still be recognised as the same project.
 name: pebble
 
+# Docker keeps every line a container writes, forever, unless told otherwise.
+# Three 10 MB files per container is the ceiling here.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
 services:
   # The database is Neon, not a container here: DATABASE_URL in
   # /opt/pebble/.env points at it.
@@ -25,6 +33,7 @@ services:
       context: ..
       target: migrate
     env_file: ../../.env
+    logging: *logging
 
   api:
     build:
@@ -32,6 +41,7 @@ services:
       target: runtime
     restart: unless-stopped
     env_file: ../../.env
+    logging: *logging
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -49,6 +59,7 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     command: caddy reverse-proxy --from http://:5555 --to api:3000
+    logging: *logging
     ports:
       - '5555:5555'
     depends_on:
