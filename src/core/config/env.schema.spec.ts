@@ -74,16 +74,13 @@ describe('envSchema: Sign in with Apple', () => {
     ]);
   });
 
-  it('refuses to start in production without Apple', () => {
+  it('starts in production without Apple', () => {
     const production = {
       NODE_ENV: 'production',
       GOOGLE_CLIENT_IDS: 'ios-client',
       CORS_ORIGINS: 'https://app.example.com',
     };
 
-    expect(issuesFor(production)).toContain('APPLE_CLIENT_IDS');
-    expect(issuesFor({ ...production, ...APPLE })).not.toContain(
-      'APPLE_CLIENT_IDS',
-    );
+    expect(issuesFor(production)).not.toContain('APPLE_CLIENT_IDS');
   });
 });

@@ -29,6 +29,16 @@ async function bootstrap() {
 
   const env = app.get<Env>(ENV);
 
+  // Allowed rather than refused (`env.schema.ts`), so the one sign that Apple
+  // sign-in is off is this line and the route's 503.
+  if (env.APPLE_CLIENT_IDS.length === 0) {
+    app
+      .get(Logger)
+      .warn(
+        'Sign in with Apple is off: the APPLE_ settings are unset, so POST /auth/apple answers 503',
+      );
+  }
+
   // A separate function rather than statements here, because an e2e builds its
   // app without ever running this file and must apply the same setup.
   configureApp(app, env);

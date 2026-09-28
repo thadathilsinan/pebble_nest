@@ -322,7 +322,9 @@ export const envSchema = z
     /**
      * Sign in with Apple (`POST /auth/apple`). All four or none: empty — the
      * default — turns Apple sign-in off with a 503 until the developer account
-     * is set up (api-plan §13), and is refused in production below.
+     * is set up (api-plan §13). Allowed in production too, unlike Google's IDs,
+     * so the service can ship before the Apple account exists; `main.ts` warns
+     * at boot while it is off.
      *
      * The bundle IDs whose identity tokens are accepted, comma-separated. iOS
      * only for now, so no Services ID (decision 34).
@@ -397,15 +399,6 @@ export const envSchema = z
         path: ['APPLE_PRIVATE_KEY'],
         message:
           "Must be the Sign in with Apple key's .p8 file: a P-256 private key in PEM",
-      });
-    }
-
-    if (env.NODE_ENV === 'production' && !appleSet) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['APPLE_CLIENT_IDS'],
-        message:
-          'Sign in with Apple accepts no token without its settings. Set them before running in production',
       });
     }
   });
