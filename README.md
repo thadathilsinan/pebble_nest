@@ -121,7 +121,8 @@ $ ./deploy/deploy.sh                        # every deploy: HEAD → build → m
 ```
 
 Also `status` and `logs [service]`.
-Point the domain in `DOMAIN` at the VPS before the first deploy.
+The API is served at `https://<DOMAIN>:5555/api/v1`. Point `DOMAIN` at the VPS
+before the first deploy, and open ports 80 and 5555 in its firewall.
 
 To check the image locally, the `app` profile builds it, migrates the compose
 database, and serves it on port 3001:

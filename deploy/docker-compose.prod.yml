@@ -38,17 +38,18 @@ services:
     # No `ports`: Caddy is the only way in. `trust proxy` is 1 in
     # `configure-app.ts`, which matches this single hop.
 
-  # HTTPS in front of the API. Caddy gets and renews the Let's Encrypt
-  # certificate for DOMAIN by itself, which needs DOMAIN's DNS pointing at this
-  # server and ports 80 and 443 open.
+  # HTTPS in front of the API, on port 5555: https://DOMAIN:5555. Caddy gets
+  # and renews the Let's Encrypt certificate for DOMAIN by itself, which needs
+  # DOMAIN's DNS pointing at this server and port 80 open as well as 5555 — port
+  # 80 is where Let's Encrypt checks that the domain is ours.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    command: caddy reverse-proxy --from ${DOMAIN:?set DOMAIN in /opt/pebble/.env} --to api:3000
+    command: caddy reverse-proxy --from https://${DOMAIN:?set DOMAIN in /opt/pebble/.env}:5555 --to api:3000
     ports:
       - '80:80'
-      - '443:443'
-      - '443:443/udp'
+      - '5555:5555'
+      - '5555:5555/udp'
     volumes:
       # The certificates. Losing them means asking Let's Encrypt again, which
       # rate-limits repeated requests for the same domain.
