@@ -1,0 +1,26 @@
+# What `COPY . .` in the Dockerfile must never pick up.
+
+# Rebuilt inside the image. A host copy would be the wrong platform's binaries
+# (macOS, not Alpine) and would overwrite the ones `npm ci` just installed.
+node_modules
+dist
+*.tsbuildinfo
+
+# Secrets. `.env` would otherwise be baked into an image layer, where anyone
+# with the image can read it — and `ConfigModule` would load it at boot,
+# silently filling in anything the deployment forgot to set.
+.env
+.env.*
+
+# Not needed to build or run.
+.git
+.gitignore
+.claude
+coverage
+test
+docs
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+.DS_Store

@@ -7,6 +7,12 @@
 #
 #   docker compose up -d --wait
 #
+# That starts the database only. The `app` profile adds the service itself, built
+# from the Dockerfile and migrated first — a local check that the image the
+# deploy ships actually boots:
+#
+#   docker compose --profile app up -d --build --wait
+#
 # The credentials are deliberately weak and deliberately committed. They guard a
 # throwaway container bound to localhost that holds no real data; treating them
 # as secrets would mean every contributor inventing their own and the DSN in
@@ -55,6 +61,47 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  # The migration image, run to completion before `app` starts — the same order
+  # a deploy must follow (see `docs/migrations.md`). Running it on every `up` is
+  # only acceptable because this is one person's machine.
+  migrate:
+    profiles: [app]
+    build:
+      context: .
+      target: migrate
+    environment:
+      # `db`, not `localhost`: inside the compose network the database is
+      # another container, reached by its service name. `sslmode=disable` is
+      # still correct — the traffic never leaves this machine.
+      DATABASE_URL: postgresql://app:app@db:5432/app?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    profiles: [app]
+    build:
+      context: .
+      target: runtime
+    environment:
+      # `test`, not the `production` the image defaults to, and only because of
+      # what production insists on at boot: a real mailer, which does not exist
+      # yet, and Google credentials this machine should not hold. `test`
+      # still gets the production log format — JSON, since `pino-pretty` is a
+      # devDependency and is not in the image.
+      NODE_ENV: test
+      LOG_LEVEL: info
+      DATABASE_URL: postgresql://app:app@db:5432/app?sslmode=disable
+      # The same throwaway values as `.env.example`, for the same reason.
+      JWT_SECRET: local-development-jwt-secret-change-me-0123456789
+      SIGN_IN_CODE_SECRET: local-development-code-secret-change-me-0123456789
+    ports:
+      # 3001 on the host so this can run beside `npm run start:dev` on 3000.
+      - '3001:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   app-db-data:

@@ -86,6 +86,9 @@ instance. Coupling it to process start removes the ability to choose.
 
 ### What a deploy needs
 
+The `migrate` target of the `Dockerfile` is built to meet every item below
+except the last: `docker run --rm -e DATABASE_URL=... pebble-migrate`.
+
 - **`drizzle-kit` must be installed.** It is a devDependency, so a production
   image built with `npm ci --omit=dev` cannot run `db:migrate` at all. Either
   install devDependencies in the image, or run migrations from a controlled
