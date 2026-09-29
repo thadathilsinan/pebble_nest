@@ -12,6 +12,7 @@ import { AllExceptionsFilter } from './core/http/all-exceptions.filter';
 import { ResponseEnvelopeInterceptor } from './core/http/response.interceptor';
 import { RequestTimeoutInterceptor } from './core/http/timeout.interceptor';
 import { LoggingModule } from './core/logging/logging.module';
+import { LegalModule } from './legal/legal.module';
 import { MeModule } from './me/me.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ReviewModule } from './review/review.module';
@@ -32,6 +33,7 @@ import { ZodValidationPipe } from './core/validation/validation.pipe';
     LoggingModule,
     DatabaseModule,
     HealthModule,
+    LegalModule,
     AuthModule,
     MeModule,
     BlocksModule,

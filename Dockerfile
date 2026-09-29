@@ -82,6 +82,9 @@ WORKDIR /app
 # its own directory, so there is no reason to let it.
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+# The legal pages, read from disk at boot; `nest build` does not copy non-TS
+# files into `dist/`.
+COPY public ./public
 COPY package.json ./
 
 # The unprivileged user the official image ships with.

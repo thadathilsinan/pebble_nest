@@ -3,6 +3,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import type { Env } from '../config/env.schema';
 import { HEALTH_ROUTES } from '../health/health.controller';
+import { LEGAL_ROUTES } from '../../legal/legal.controller';
 
 /**
  * The prefix every route in this service sits under, separating the API from
@@ -112,8 +113,12 @@ export function configureApp(app: NestExpressApplication, env: Env): void {
   // Excluding the prefix is only half of it: versioning is a separate mechanism
   // and would still stamp `/v1` onto these routes, so `HealthController` also
   // declares `version: VERSION_NEUTRAL`. Either one alone leaves the probes
-  // somewhere other than `/health/*`.
-  app.setGlobalPrefix(API_PREFIX, { exclude: HEALTH_ROUTES });
+  // somewhere other than `/health/*`. The legal pages are excluded the same way
+  // and for the same kind of reason: store listings and sign-in consent screens
+  // link to them, and those links outlive any API version.
+  app.setGlobalPrefix(API_PREFIX, {
+    exclude: [...HEALTH_ROUTES, ...LEGAL_ROUTES],
+  });
   app.enableVersioning({
     type: VersioningType.URI,
     defaultVersion: DEFAULT_VERSION,
