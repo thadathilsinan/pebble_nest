@@ -12,7 +12,7 @@ export const LEGAL_PATH = 'legal';
  * same reason as `HEALTH_ROUTES`: one list of strings, so the exclusion cannot
  * drift from the routes it exempts.
  */
-export const LEGAL_ROUTES = [`${LEGAL_PATH}/privacy`];
+export const LEGAL_ROUTES = [`${LEGAL_PATH}/privacy`, `${LEGAL_PATH}/terms`];
 
 /**
  * Relative to the working directory, which is the repo root locally and under
@@ -22,12 +22,18 @@ export const LEGAL_ROUTES = [`${LEGAL_PATH}/privacy`];
  */
 const PAGES_DIR = join(process.cwd(), 'public', LEGAL_PATH);
 
+/** Reads one page from `PAGES_DIR`. */
+function readPage(file: string): string {
+  return readFileSync(join(PAGES_DIR, file), 'utf8');
+}
+
 /**
- * The privacy policy, served as HTML at a URL outside `/api/v1`.
+ * The privacy policy and terms of service, served as HTML at URLs outside
+ * `/api/v1`.
  *
- * Outside the API because this URL is printed in places that cannot be edited
+ * Outside the API because these URLs are printed in places that cannot be edited
  * on a deploy: App Store and Play listings, and the Google and Apple sign-in
- * consent screens. Bumping the API version must not move it — which, as with
+ * consent screens. Bumping the API version must not move them — which, as with
  * the health probes, takes both the prefix exclusion and `VERSION_NEUTRAL`.
  *
  * Read once at construction rather than per request: the content only changes
@@ -38,15 +44,20 @@ const PAGES_DIR = join(process.cwd(), 'public', LEGAL_PATH);
 @NoEnvelope()
 @Controller({ path: LEGAL_PATH, version: VERSION_NEUTRAL })
 export class LegalController {
-  private readonly privacyHtml = readFileSync(
-    join(PAGES_DIR, 'privacy.html'),
-    'utf8',
-  );
+  private readonly privacyHtml = readPage('privacy.html');
+  private readonly termsHtml = readPage('terms.html');
 
   @Get('privacy')
   @Header('Content-Type', 'text/html; charset=utf-8')
   @Header('Cache-Control', 'public, max-age=3600')
   privacy(): string {
     return this.privacyHtml;
+  }
+
+  @Get('terms')
+  @Header('Content-Type', 'text/html; charset=utf-8')
+  @Header('Cache-Control', 'public, max-age=3600')
+  terms(): string {
+    return this.termsHtml;
   }
 }

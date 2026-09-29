@@ -37,11 +37,24 @@ describe('Legal pages (e2e)', () => {
       .expect('Content-Type', /^text\/html; charset=utf-8/);
 
     expect(res.text).toMatch(/^<!doctype html>/);
-    expect(res.text).toContain('PRIVACY POLICY');
+    expect(res.text).toContain('<h1>Privacy Policy</h1>');
   });
 
-  it('is not under the API prefix or version', async () => {
-    await http().get('/api/v1/legal/privacy').expect(404);
-    await http().get('/v1/legal/privacy').expect(404);
+  it('serves the terms of service as HTML, unenveloped and without a token', async () => {
+    const res = await http()
+      .get('/legal/terms')
+      .expect(200)
+      .expect('Content-Type', /^text\/html; charset=utf-8/);
+
+    expect(res.text).toMatch(/^<!doctype html>/);
+    expect(res.text).toContain('<h1>Terms of Service</h1>');
   });
+
+  it.each(['privacy', 'terms'])(
+    'does not serve %s under the API prefix or version',
+    async (page) => {
+      await http().get(`/api/v1/legal/${page}`).expect(404);
+      await http().get(`/v1/legal/${page}`).expect(404);
+    },
+  );
 });
