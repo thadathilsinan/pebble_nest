@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BlocksModule } from '../blocks/blocks.module';
 import { UsersModule } from '../users/users.module';
+import { DayCloseService } from './day-close.service';
 import { TaskSeriesRepository } from './task-series.repository';
 import { TaskSeriesService } from './task-series.service';
 import { TasksController } from './tasks.controller';
@@ -15,13 +16,15 @@ import { TasksService } from './tasks.service';
   imports: [BlocksModule, UsersModule],
   controllers: [TasksController],
   providers: [
+    DayCloseService,
     TasksService,
     TasksRepository,
     TaskSeriesRepository,
     TaskSeriesService,
   ],
   // `DaysModule` lays a day's tasks out beside its blocks, issuing repeating
-  // tasks' occurrences first.
-  exports: [TasksRepository, TaskSeriesService],
+  // tasks' occurrences first. The day-end close runs before any signed-in
+  // request.
+  exports: [TasksRepository, TaskSeriesService, DayCloseService],
 })
 export class TasksModule {}

@@ -194,6 +194,29 @@ export class UsersRepository {
     return row ?? { firstRecordedDay: null, hasAnyRecord: false };
   }
 
+  /**
+   * The user, locked until the transaction ends, so two requests closing
+   * the same user's days take turns. Null when the account is gone.
+   */
+  async findByIdForUpdate(ex: Executor, id: string): Promise<UserRow | null> {
+    const [row] = await ex
+      .select()
+      .from(users)
+      .where(eq(users.id, id))
+      .limit(1)
+      .for('update');
+
+    return row ?? null;
+  }
+
+  /**
+   * Records that the user's days through `day` have closed. Not a profile
+   * edit, so `version` stays. The caller holds the row's lock.
+   */
+  async setClosedThrough(ex: Executor, id: string, day: string): Promise<void> {
+    await ex.update(users).set({ closedThrough: day }).where(eq(users.id, id));
+  }
+
   async findById(ex: Executor, id: string): Promise<UserRow | null> {
     const [row] = await ex
       .select()

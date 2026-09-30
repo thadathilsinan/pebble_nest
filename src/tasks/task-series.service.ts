@@ -8,11 +8,16 @@ import type { TaskSeriesRow } from '../core/database/schema';
 import {
   landsOn,
   nextOccurrenceAfter,
+  settle,
   type BlockOccursOn,
   type SeriesDays,
+  type Settled,
 } from './task-series';
 import { issuedKey, TaskSeriesRepository } from './task-series.repository';
 import { TasksRepository } from './tasks.repository';
+
+/** Before any date a series can be anchored on (`localDate`'s floor). */
+const EARLIEST_DATE = '1900-01-01';
 
 /**
  * Issuing repeating tasks' occurrences, and finding where a series goes
@@ -46,6 +51,34 @@ export class TaskSeriesService {
   ): Promise<void> {
     const rows = await this.series.findActiveBetween(ex, userId, from, to);
     await this.issue(ex, rows, from, to, blockOccursOn);
+  }
+
+  /**
+   * `issueBetween` for the closed days from `from` to `to`, for the day-end
+   * close, so a day nobody read still issues its occurrences to settle. With
+   * a null `from`, nothing has closed yet, and every day from the user's
+   * earliest series anchor is issued.
+   */
+  async issueClosed(
+    ex: Executor,
+    userId: string,
+    from: string | null,
+    to: string,
+  ): Promise<void> {
+    const rows = await this.series.findActiveBetween(
+      ex,
+      userId,
+      from ?? EARLIEST_DATE,
+      to,
+    );
+    if (rows.length === 0) return;
+    const start =
+      from ??
+      rows.reduce(
+        (min, row) => (row.anchorDate < min ? row.anchorDate : min),
+        to,
+      );
+    await this.issue(ex, rows, start, to);
   }
 
   /**
@@ -143,6 +176,22 @@ export class TaskSeriesService {
       date,
       await this.blockOccursOnAfter(ex, userId, series.blockSeriesId, date),
     );
+  }
+
+  /**
+   * Where an open task on closed day `date` ends up (`settle`): its series'
+   * next occurrence decides whether it carries to today or is missed first.
+   */
+  async settleClosed(
+    ex: Executor,
+    userId: string,
+    series: SeriesDays | null,
+    date: string,
+    today: string,
+  ): Promise<Settled> {
+    const next =
+      series === null ? null : await this.nextAfter(ex, userId, series, date);
+    return settle(date, today, next);
   }
 
   /**

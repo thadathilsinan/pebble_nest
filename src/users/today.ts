@@ -7,7 +7,7 @@ import type { UserRow } from '../core/database/schema';
  * app reports it on every open, so this only covers the first requests of a
  * brand new account.
  */
-const FALLBACK_TIME_ZONE = 'UTC';
+export const FALLBACK_TIME_ZONE = 'UTC';
 
 /**
  * Today in the user's time zone: every day before it has closed (decision

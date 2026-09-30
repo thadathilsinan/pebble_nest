@@ -21,12 +21,7 @@ import type { DeleteTaskQuery } from './dto/delete-task.dto';
 import type { MoveTaskBody } from './dto/move-task.dto';
 import type { SetTaskDoneBody } from './dto/set-task-done.dto';
 import type { UpdateTaskBody } from './dto/update-task.dto';
-import {
-  ownRecurrenceOf,
-  settle,
-  type SeriesDays,
-  type Settled,
-} from './task-series';
+import { ownRecurrenceOf } from './task-series';
 import {
   TaskSeriesRepository,
   type NewTaskSeries,
@@ -115,7 +110,7 @@ export class TasksService {
     const created = await this.db.transaction(async (tx) => {
       const settled =
         body.date < today
-          ? await this.settleClosed(
+          ? await this.series.settleClosed(
               tx,
               caller.userId,
               series && { ...series, endedOn: null },
@@ -151,7 +146,7 @@ export class TasksService {
               (await this.taskSeries.create(tx, series)).id,
             );
       if (settled !== null) {
-        await this.recordSettled(tx, task, body.date, settled, today);
+        await this.tasks.recordSettled(tx, task, body.date, settled, today);
       }
       return this.withSeries(tx, task);
     });
@@ -201,7 +196,7 @@ export class TasksService {
         return { ...task, task: await this.tasks.setDone(tx, found.id, false) };
       }
 
-      const settled = await this.settleClosed(
+      const settled = await this.series.settleClosed(
         tx,
         caller.userId,
         task.series,
@@ -213,7 +208,7 @@ export class TasksService {
         days: settled.carryDays,
         missed: settled.missed,
       });
-      await this.recordSettled(tx, carried, found.date, settled, today);
+      await this.tasks.recordSettled(tx, carried, found.date, settled, today);
       return { ...task, task: carried };
     });
 
@@ -578,51 +573,6 @@ export class TasksService {
   ): Promise<string[]> {
     await this.taskSeries.endBy(ex, series.id, date);
     return this.tasks.dropLaterCopies(ex, series.id, date);
-  }
-
-  /**
-   * Where an open task on closed day `date` ends up (`settle`): its series'
-   * next occurrence decides whether it carries to today or is missed first.
-   */
-  private async settleClosed(
-    ex: Executor,
-    userId: string,
-    series: SeriesDays | null,
-    date: string,
-    today: string,
-  ): Promise<Settled> {
-    const next =
-      series === null
-        ? null
-        : await this.series.nextAfter(ex, userId, series, date);
-    return settle(date, today, next);
-  }
-
-  /**
-   * The ledger for a task `settle`d from closed day `from`: `incomplete` on
-   * each day it carried out of, and `missed` on the day it stopped, if it
-   * was missed. `task` is the row as it now sits.
-   */
-  private async recordSettled(
-    ex: Executor,
-    task: TaskRow,
-    from: string,
-    settled: Settled,
-    today: string,
-  ): Promise<void> {
-    if (!settled.missed) {
-      await this.tasks.recordIncomplete(ex, task, from, addDays(today, -1));
-      return;
-    }
-    if (settled.carryDays > 0) {
-      await this.tasks.recordIncomplete(
-        ex,
-        task,
-        from,
-        addDays(settled.date, -1),
-      );
-    }
-    await this.tasks.recordMissed(ex, task);
   }
 
   /** The task with the series it is an occurrence of, for its `repeat`. */

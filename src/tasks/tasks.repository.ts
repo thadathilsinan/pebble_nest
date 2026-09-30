@@ -6,12 +6,14 @@ import {
   gt,
   gte,
   inArray,
+  lt,
   lte,
   ne,
   not,
   or,
   sql,
 } from 'drizzle-orm';
+import { addDays } from '../calendar/local-date';
 import type { Executor } from '../core/database/database.module';
 import {
   taskLedgerEntries,
@@ -19,6 +21,7 @@ import {
   tasks,
   type TaskRow,
 } from '../core/database/schema';
+import type { Settled } from './task-series';
 import type { TaskWithSeries } from './tasks.mapper';
 
 /** The columns `POST /tasks` writes. */
@@ -54,6 +57,19 @@ export type TaskChanges = Partial<
     'title' | 'notes' | 'reminderDate' | 'reminderMin' | 'taskSeriesId'
   >
 >;
+
+/**
+ * The columns a `Carry` sets: out of its block if it leaves its day, since
+ * a carried task arrives on the next day's general list (TSK-06).
+ */
+function carried(carry: Carry) {
+  return {
+    date: carry.date,
+    carryCount: sql`${tasks.carryCount} + ${carry.days}`,
+    missed: carry.missed ?? false,
+    ...(carry.days > 0 && { blockSeriesId: null }),
+  };
+}
 
 @Injectable()
 export class TasksRepository {
@@ -237,18 +253,75 @@ export class TasksRepository {
         done,
         doneAt: done ? sql`now()` : null,
         version: sql`${tasks.version} + 1`,
-        ...(carry && {
-          date: carry.date,
-          carryCount: sql`${tasks.carryCount} + ${carry.days}`,
-          missed: carry.missed ?? false,
-          ...(carry.days > 0 && { blockSeriesId: null }),
-        }),
+        ...(carry && carried(carry)),
       })
       .where(eq(tasks.id, id))
       .returning();
 
     if (row === undefined) throw new Error('task vanished while locked');
     return row;
+  }
+
+  /**
+   * The user's open tasks dated before `before` that no day has recorded
+   * missed: what the day-end close has yet to settle. Locked until the
+   * transaction ends, in id order. Uses `idx_tasks_user_id_date`.
+   */
+  findUnsettledBeforeForUpdate(
+    ex: Executor,
+    userId: string,
+    before: string,
+  ): Promise<TaskRow[]> {
+    return ex
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.userId, userId),
+          lt(tasks.date, before),
+          eq(tasks.done, false),
+          eq(tasks.missed, false),
+        ),
+      )
+      .orderBy(tasks.id)
+      .for('update');
+  }
+
+  /**
+   * Carries an open task left on a closed day as `carry` says, and bumps
+   * `version`. The caller holds the row's lock.
+   */
+  async carry(ex: Executor, id: string, carry: Carry): Promise<TaskRow> {
+    const [row] = await ex
+      .update(tasks)
+      .set({ ...carried(carry), version: sql`${tasks.version} + 1` })
+      .where(eq(tasks.id, id))
+      .returning();
+
+    if (row === undefined) throw new Error('task vanished while locked');
+    return row;
+  }
+
+  /**
+   * The ledger for a task `settle`d from closed day `from`: `incomplete` on
+   * each day it carried out of, and `missed` on the day it stopped, if it
+   * was missed. `task` is the row as it now sits.
+   */
+  async recordSettled(
+    ex: Executor,
+    task: TaskRow,
+    from: string,
+    settled: Settled,
+    today: string,
+  ): Promise<void> {
+    if (!settled.missed) {
+      await this.recordIncomplete(ex, task, from, addDays(today, -1));
+      return;
+    }
+    if (settled.carryDays > 0) {
+      await this.recordIncomplete(ex, task, from, addDays(settled.date, -1));
+    }
+    await this.recordMissed(ex, task);
   }
 
   /**
