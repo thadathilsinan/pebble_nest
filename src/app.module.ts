@@ -4,6 +4,8 @@ import { AuthModule } from './auth/auth.module';
 import { BlockNamesModule } from './block-names/block-names.module';
 import { BlockOccurrencesModule } from './block-occurrences/block-occurrences.module';
 import { BlocksModule } from './blocks/blocks.module';
+import { DayCloseInterceptor } from './day-close/day-close.interceptor';
+import { DayCloseModule } from './day-close/day-close.module';
 import { AppConfigModule } from './core/config/config.module';
 import { DatabaseModule } from './core/database/database.module';
 import { DaysModule } from './days/days.module';
@@ -40,6 +42,7 @@ import { ZodValidationPipe } from './core/validation/validation.pipe';
     BlockOccurrencesModule,
     BlockNamesModule,
     DaysModule,
+    DayCloseModule,
     TasksModule,
     NotificationsModule,
     ReviewModule,
@@ -57,6 +60,10 @@ import { ZodValidationPipe } from './core/validation/validation.pipe';
     // `AllExceptionsFilter` to render, rather than somewhere the envelope would
     // wrap a payload that never arrived.
     { provide: APP_INTERCEPTOR, useClass: RequestTimeoutInterceptor },
+    // Inside the timeout, so a close that runs long is bounded like the
+    // handler it runs before. Guards run before any interceptor, so the
+    // caller is known by then.
+    { provide: APP_INTERCEPTOR, useExisting: DayCloseInterceptor },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })

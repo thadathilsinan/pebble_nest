@@ -10,6 +10,7 @@ import { accessTokenInvalid } from '../auth/errors';
 import { SessionsRepository } from '../auth/sessions.repository';
 import { SignInCodesRepository } from '../auth/sign-in-codes.repository';
 import { DB, type Db, type Executor } from '../core/database/database.module';
+import { ClosedDaysCache } from '../day-close/closed-days-cache';
 import type { SessionRow, UserRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
 import { toProfile, type Profile } from '../users/users.mapper';
@@ -28,6 +29,7 @@ export class MeService {
     private readonly users: UsersRepository,
     private readonly appleGrants: AppleGrantsRepository,
     @Inject(APPLE_TOKENS) private readonly appleTokens: AppleTokens,
+    private readonly closedDays: ClosedDaysCache,
     private readonly logger: PinoLogger,
   ) {
     this.logger.setContext(MeService.name);
@@ -59,6 +61,9 @@ export class MeService {
    * version check. Any other body is a versioned edit: a stale `version` is a
    * 409 carrying the current profile, so the client can re-apply and retry
    * without another read.
+   *
+   * A new time zone moves the user's today, so what the day-end close
+   * remembers of them is forgotten, and the next request closes by it.
    */
   async update(caller: Caller, body: UpdateProfileBody): Promise<Profile> {
     const session = await this.liveSession(this.db, caller);
@@ -69,6 +74,7 @@ export class MeService {
         caller.userId,
         body.timeZone,
       );
+      this.closedDays.delete(caller.userId);
       if (user === null) throw accessTokenInvalid();
 
       return this.profile(user, session);
@@ -85,6 +91,7 @@ export class MeService {
       version,
       patch,
     );
+    if (patch.timeZone !== undefined) this.closedDays.delete(caller.userId);
 
     switch (result.outcome) {
       case 'updated':
@@ -139,6 +146,7 @@ export class MeService {
       },
     );
 
+    this.closedDays.delete(caller.userId);
     if (grant === null) return;
 
     try {

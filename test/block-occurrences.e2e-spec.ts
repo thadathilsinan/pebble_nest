@@ -342,7 +342,8 @@ describe('Editing, skipping and deleting a block occurrence (e2e)', () => {
 
     const res = await skip(seriesId, date).expect(200);
 
-    expect(res.body).toEqual({ data: { movedTaskCount: 1 } });
+    // The day-end close before the request has carried it already.
+    expect(res.body).toEqual({ data: { movedTaskCount: 0 } });
     expect((await getDay(today)).generalList).toEqual([
       expect.objectContaining({
         id: task.id,
@@ -592,7 +593,9 @@ describe('Editing, skipping and deleting a block occurrence (e2e)', () => {
 
       const res = await remove(seriesId, date).expect(200);
 
-      expect(res.body).toEqual({ data: { movedTaskCount: 2 } });
+      // Only the done one: the day-end close before the request has
+      // carried the open one already.
+      expect(res.body).toEqual({ data: { movedTaskCount: 1 } });
       expect((await getDay(today)).generalList).toEqual([
         expect.objectContaining({
           id: open.id,

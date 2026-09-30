@@ -9,6 +9,7 @@ import { configureApp } from '../src/core/bootstrap/configure-app';
 import { ENV } from '../src/core/config/config.module';
 import type { Env } from '../src/core/config/env.schema';
 import { POOL } from '../src/core/database/database.module';
+import { ClosedDaysCache } from '../src/day-close/closed-days-cache';
 import { DayCloseService } from '../src/tasks/day-close.service';
 
 /** Captures what would have been emailed, instead of logging it. */
@@ -27,7 +28,12 @@ class FakeMailer implements Mailer {
   }
 }
 
-type Task = { id: string; date: string; blockSeriesId: string | null };
+type Task = {
+  id: string;
+  date: string;
+  blockSeriesId: string | null;
+  carryCount: number;
+};
 
 /** Zones 25 hours apart, so their calendar dates always differ. */
 const AHEAD = 'Pacific/Kiritimati';
@@ -42,6 +48,7 @@ describe('Day-end close (e2e)', () => {
   let pool: Pool;
   let mailer: FakeMailer;
   let dayClose: DayCloseService;
+  let cache: ClosedDaysCache;
   let accessToken: string;
   let userId: string;
   /** Today for the user, who has reported no zone and so reads UTC. */
@@ -65,6 +72,7 @@ describe('Day-end close (e2e)', () => {
 
     pool = moduleFixture.get<Pool>(POOL);
     dayClose = moduleFixture.get(DayCloseService);
+    cache = moduleFixture.get(ClosedDaysCache);
     await pool.query(
       'TRUNCATE users, sessions, session_refresh_tokens, email_sign_in_codes, block_series, tasks, task_ledger_entries RESTART IDENTITY CASCADE',
     );
@@ -328,5 +336,82 @@ describe('Day-end close (e2e)', () => {
     await pool.query('DELETE FROM users');
 
     expect(await dayClose.close(userId)).toBeNull();
+  });
+
+  describe('before each signed-in request', () => {
+    function authed<T extends { set: (k: string, v: string) => T }>(req: T) {
+      return req.set('Authorization', `Bearer ${accessToken}`);
+    }
+
+    it('settles the closed days before the handler reads them', async () => {
+      const task = await createTask({ title: 'A', date: today });
+      await travelBack(2, addDays(today, -3));
+      // What a new day does to what the last request remembered.
+      cache.delete(userId);
+
+      const res = await authed(http().get(`/api/v1/days/${today}`)).expect(200);
+
+      expect(
+        (res.body as { data: { generalList: Task[] } }).data.generalList,
+      ).toMatchObject([{ id: task.id, date: today, carryCount: 2 }]);
+    });
+
+    it('settles them before a write too', async () => {
+      const task = await createTask({ title: 'A', date: today });
+      await travelBack(1, addDays(today, -2));
+      cache.delete(userId);
+
+      await authed(http().patch(`/api/v1/tasks/${task.id}/done`))
+        .send({ done: true })
+        .expect(200);
+
+      expect(await taskRows()).toMatchObject([
+        { date: today, carryCount: 1, done: true },
+      ]);
+      expect(await ledger()).toEqual([
+        { day: addDays(today, -1), outcome: 'incomplete' },
+        { day: today, outcome: 'completed' },
+      ]);
+    });
+
+    it('reads nothing more once today’s close is remembered', async () => {
+      await authed(http().get(`/api/v1/days/${today}`)).expect(200);
+      const close = jest.spyOn(dayClose, 'close');
+
+      await authed(http().get(`/api/v1/days/${today}`)).expect(200);
+      await authed(http().get('/api/v1/me')).expect(200);
+
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('closes again by a new time zone', async () => {
+      await authed(http().get(`/api/v1/days/${today}`)).expect(200);
+      const close = jest.spyOn(dayClose, 'close');
+
+      await authed(http().patch('/api/v1/me'))
+        .send({ timeZone: AHEAD })
+        .expect(200);
+      await authed(http().get(`/api/v1/days/${today}`)).expect(200);
+
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(cache.get(userId)?.timeZone).toBe(AHEAD);
+    });
+
+    it('does not close for an account being deleted, or without a caller', async () => {
+      await authed(http().get(`/api/v1/days/${today}`)).expect(200);
+      expect(cache.get(userId)).toBeDefined();
+      // A new day, so any close would have work to do.
+      cache.delete(userId);
+      const close = jest.spyOn(dayClose, 'close');
+
+      await http()
+        .post('/api/v1/auth/email/code')
+        .send({ email: 'other@example.com' })
+        .expect(204);
+      await authed(http().delete('/api/v1/me')).expect(204);
+
+      expect(close).not.toHaveBeenCalled();
+      expect(cache.get(userId)).toBeUndefined();
+    });
   });
 });

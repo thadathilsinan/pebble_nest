@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, Patch } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
 import { CurrentCaller } from '../auth/current-caller.decorator';
+import { SkipDayClose } from '../day-close/day-close.interceptor';
 import { UpdateProfileBody } from './dto/update-profile.dto';
 import { MeService } from './me.service';
 
@@ -20,6 +21,7 @@ export class MeController {
 
   @Delete()
   @HttpCode(204)
+  @SkipDayClose()
   delete(@CurrentCaller() caller: Caller) {
     return this.me.delete(caller);
   }

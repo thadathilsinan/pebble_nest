@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { DayCloseModule } from '../day-close/day-close.module';
 import { UsersModule } from '../users/users.module';
 import { MeController } from './me.controller';
 import { MeService } from './me.service';
@@ -10,7 +11,7 @@ import { MeService } from './me.service';
  * `AuthModule` already imports `UsersModule`.
  */
 @Module({
-  imports: [AuthModule, UsersModule],
+  imports: [AuthModule, DayCloseModule, UsersModule],
   controllers: [MeController],
   providers: [MeService],
 })

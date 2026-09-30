@@ -35,7 +35,7 @@ export class TaskSeriesService {
   /**
    * Writes every occurrence the user's series have from `from` to `to`, both
    * included, that has not been issued yet. A closed day's occurrence is
-   * issued open like any other, and left for the day-end job to settle.
+   * issued open like any other, and left for the next day-end close to settle.
    *
    * `blockOccursOn` answers for the user's blocks over the same range, from
    * what the caller has already read of them; without it, they are read

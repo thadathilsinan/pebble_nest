@@ -51,8 +51,8 @@ export class DaysService {
    *
    * Repeating tasks' occurrences in the range are issued first, if they
    * haven't been, since the server creates them as their dates are read
-   * (api-plan §1). A closed day's are issued open, for the day-end job to
-   * settle. It does not read the session (decision 16).
+   * (api-plan §1). A closed day's are issued open, for the next day-end
+   * close to settle. It does not read the session (decision 16).
    */
   async list(caller: Caller, from: string, to: string): Promise<Day[]> {
     // The day before `from`, for the tails of blocks that began then and the

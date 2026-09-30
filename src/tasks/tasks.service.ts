@@ -51,14 +51,13 @@ export class TasksService {
    * later occurrences are issued as their dates are read.
    *
    * Any date is accepted (TSK-05), past included. A task put on a day that
-   * has already closed is settled at once, as the day-end job would have
+   * has already closed is settled at once, as the day-end close would have
    * settled it (decision 2): carried to today's general list with one
    * `incomplete` entry per closed day it passed through, or, if its series
    * comes round again first, recorded missed on the day before that
    * (REC-06). The response shows where it ended up. The series' other
    * closed-day occurrences are issued open when read, like any other day's.
-   * Until the day-end job keeps its own record, "closed" means before today
-   * in the user's time zone.
+   * "Closed" means before today in the user's time zone.
    *
    * A retry carrying the same `idempotencyKey` returns the task the first
    * request created, whatever the retry's body says, and writes no series or

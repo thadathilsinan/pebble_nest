@@ -185,6 +185,18 @@ export const envSchema = z
      */
     REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
     /**
+     * How many users' closed days are remembered in memory, so a request
+     * whose user has nothing new to close skips the database (decision 38
+     * in `docs/api-plan.md`). The least recently seen user is forgotten past
+     * it, and costs one read on their next request. About 200 bytes each,
+     * so the default is about 20 MB at most.
+     */
+    DAY_CLOSE_CACHE_MAX_USERS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(100_000),
+    /**
      * How to reach Postgres, entire: host, port, credentials, database and TLS
      * mode in one string.
      *

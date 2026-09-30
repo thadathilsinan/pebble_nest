@@ -113,7 +113,7 @@ export class TasksRepository {
 
   /**
    * Records `task` incomplete on every day from `from` to `to`, both
-   * included: what the day-end job would have written had the task sat open
+   * included: what the day-end close would have written had the task sat open
    * through them (TSK-06/07).
    *
    * One statement over `generate_series` rather than a row per day from here,
