@@ -110,8 +110,9 @@ Point the platform's health checks at:
 ### To a VPS
 
 `deploy/deploy.sh` deploys to any Linux server you can SSH into (a Hostinger
-VPS, for example) with no registry or CI. The server runs the API behind
-Caddy, from `deploy/docker-compose.prod.yml`; the database is Neon.
+VPS, for example) with no registry or CI. The server runs the API from
+`deploy/docker-compose.prod.yml`, behind a Traefik already running on the VPS;
+the database is Neon.
 
 ```bash
 $ export PEBBLE_HOST=root@<vps-ip>
@@ -121,8 +122,9 @@ $ ./deploy/deploy.sh                        # every deploy: HEAD → build → m
 ```
 
 Also `status` and `logs [service]`.
-The API is served over plain HTTP at `http://<vps-ip>:5555/api/v1`; open port
-5555 in the VPS firewall.
+The API is served at `https://pebble.moduluz.io/api/v1`. Traefik gets the
+certificate from Let's Encrypt, so the domain's `A` record must point at the VPS
+and ports 80 and 443 must be open.
 
 To check the image locally, the `app` profile builds it, migrates the compose
 database, and serves it on port 3001:

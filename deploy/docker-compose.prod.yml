@@ -45,22 +45,19 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    # No `ports`: Caddy is the only way in. `trust proxy` is 1 in
-    # `configure-app.ts`, which matches this single hop.
-
-  # The way in: plain HTTP on port 5555 of the VPS's IP, http://<vps-ip>:5555.
-  # No HTTPS, because there is no domain to get a certificate for.
-  #
-  # Caddy rather than publishing the API's port directly, because of `trust
-  # proxy` above: with no proxy in front, the API would believe any
-  # X-Forwarded-For a client sends and key its rate limits on it. Caddy replaces
-  # that header with the real client address.
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    command: caddy reverse-proxy --from http://:5555 --to api:3000
-    logging: *logging
-    ports:
-      - '5555:5555'
-    depends_on:
-      - api
+    # No `ports`: Traefik is the only way in, at https://pebble.moduluz.io.
+    # Traefik runs separately on the VPS (its own compose file, with
+    # `network_mode: host`, entrypoints `web`/`websecure` and the `letsencrypt`
+    # resolver), finds this container through these labels, and reaches it on
+    # its IP in this project's default network, so no shared network is needed.
+    #
+    # `trust proxy` is 1 in `configure-app.ts`, which matches this single hop.
+    # Traefik does not trust forwarded headers by default, so it replaces any
+    # X-Forwarded-For a client sends with the real client address, and the rate
+    # limits key on that.
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pebble.rule=Host(`pebble.moduluz.io`)
+      - traefik.http.routers.pebble.entrypoints=websecure
+      - traefik.http.routers.pebble.tls.certresolver=letsencrypt
+      - traefik.http.services.pebble.loadbalancer.server.port=3000
