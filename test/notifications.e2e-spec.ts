@@ -253,21 +253,45 @@ describe('GET /notifications/schedule (e2e)', () => {
     it('lists open tasks by their reminder’s own date', async () => {
       const task = await postTask({
         title: 'Call mum',
-        // The task sits on Monday; its reminder is on Wednesday.
+        date: WED,
         reminderAt: `${WED}T17:30`,
       });
-      // The reminder falls after the range, though the task is inside it.
-      await postTask({ title: 'Later', reminderAt: `${NEXT_MON}T09:00` });
-      // The task sits after the range, though its reminder is inside it.
+      await postTask({
+        title: 'Later',
+        date: NEXT_MON,
+        reminderAt: `${NEXT_MON}T09:00`,
+      });
+      // A block crossing midnight reminds early the next morning: this task
+      // sits before the range, though its reminder is inside it…
+      const before = await postBlock({
+        name: 'Night',
+        date: '2030-09-01',
+        startMin: 1320,
+        endMin: 120,
+      });
       const early = await postTask({
         title: 'Early',
-        date: NEXT_MON,
-        reminderAt: `${SUN}T08:00`,
+        date: before.date,
+        blockSeriesId: before.seriesId,
+        reminderAt: `${MON}T01:00`,
+      });
+      // …and this one sits inside it, though its reminder falls after.
+      const last = await postBlock({
+        name: 'Night',
+        date: SUN,
+        startMin: 1320,
+        endMin: 120,
+      });
+      await postTask({
+        title: 'Late',
+        date: SUN,
+        blockSeriesId: last.seriesId,
+        reminderAt: `${NEXT_MON}T01:00`,
       });
 
       expect((await schedule()).taskReminders).toEqual([
+        { taskId: early.id, title: 'Early', remindAt: `${MON}T01:00` },
         { taskId: task.id, title: 'Call mum', remindAt: `${WED}T17:30` },
-        { taskId: early.id, title: 'Early', remindAt: `${SUN}T08:00` },
       ]);
     });
 
@@ -287,9 +311,9 @@ describe('GET /notifications/schedule (e2e)', () => {
     });
 
     it('orders by time, then title', async () => {
-      await postTask({ title: 'b', reminderAt: `${TUE}T09:00` });
+      await postTask({ title: 'b', date: TUE, reminderAt: `${TUE}T09:00` });
       await postTask({ title: 'z', reminderAt: `${MON}T10:00` });
-      await postTask({ title: 'a', reminderAt: `${TUE}T09:00` });
+      await postTask({ title: 'a', date: TUE, reminderAt: `${TUE}T09:00` });
 
       expect((await schedule()).taskReminders.map((r) => r.title)).toEqual([
         'z',

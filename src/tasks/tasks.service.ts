@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Caller } from '../auth/caller';
 import { assertOccursOn } from '../blocks/block-occurrence';
+import { shapeOf } from '../blocks/blocks.mapper';
 import { BlocksRepository } from '../blocks/blocks.repository';
 import { addDays, daysBetween } from '../calendar/local-date';
 import { resolveRecurrence, type Recurrence } from '../calendar/recurrence';
@@ -21,6 +22,7 @@ import type { DeleteTaskQuery } from './dto/delete-task.dto';
 import type { MoveTaskBody } from './dto/move-task.dto';
 import type { SetTaskDoneBody } from './dto/set-task-done.dto';
 import type { UpdateTaskBody } from './dto/update-task.dto';
+import { assertReminderFits, type BlockTimes } from './reminder';
 import { ownRecurrenceOf } from './task-series';
 import {
   TaskSeriesRepository,
@@ -73,6 +75,7 @@ export class TasksService {
       throw repeatNotAllowed();
     }
 
+    let block: BlockTimes | null = null;
     if (body.blockSeriesId != null) {
       const found = await this.blocks.findOccurrence(
         this.db,
@@ -84,7 +87,9 @@ export class TasksService {
       if (withBlock && found.series.recurrenceKind === 'none') {
         throw repeatNotAllowed();
       }
+      block = shapeOf(found.series, found.exception);
     }
+    if (body.reminderAt) assertReminderFits(body.reminderAt, body.date, block);
 
     const series: NewTaskSeries | null =
       ownRepeat || withBlock
@@ -136,9 +141,11 @@ export class TasksService {
       });
       if (!created) return this.withSeries(tx, row);
 
+      // A task carried off its day takes its reminder along (decision 39).
+      const placed = settled === null ? row : await this.tasks.refit(tx, row);
       const task =
         series === null
-          ? row
+          ? placed
           : await this.tasks.linkSeries(
               tx,
               row.id,
@@ -262,6 +269,13 @@ export class TasksService {
 
       const repeat = await this.repeatChange(tx, task, series, body);
       const changes = changesTo(task, body);
+      if (changes?.reminderDate != null) {
+        assertReminderFits(
+          { date: changes.reminderDate, min: changes.reminderMin! },
+          task.date,
+          await this.blockTimesOf(tx, task),
+        );
+      }
       if (changes === undefined && repeat.kind === 'keep') {
         return { task, series };
       }
@@ -572,6 +586,24 @@ export class TasksService {
   ): Promise<string[]> {
     await this.taskSeries.endBy(ex, series.id, date);
     return this.tasks.dropLaterCopies(ex, series.id, date);
+  }
+
+  /**
+   * The times of the occurrence `task` sits in, overrides included, or null
+   * on the general list.
+   */
+  private async blockTimesOf(
+    ex: Executor,
+    task: TaskRow,
+  ): Promise<BlockTimes | null> {
+    if (task.blockSeriesId === null) return null;
+    const found = await this.blocks.findOccurrence(
+      ex,
+      task.userId,
+      task.blockSeriesId,
+      task.date,
+    );
+    return found === null ? null : shapeOf(found.series, found.exception);
   }
 
   /** The task with the series it is an occurrence of, for its `repeat`. */

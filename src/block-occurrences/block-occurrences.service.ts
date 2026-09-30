@@ -337,6 +337,10 @@ export class BlockOccurrencesService {
         await this.taskSeries.endWithBlock(tx, series.id, null);
       }
     }
+    // Reminders its new times leave out go back to its start (decision 39).
+    if (changes.startMin !== undefined || changes.endMin !== undefined) {
+      await this.tasks.fitRemindersInBlock(tx, series.id);
+    }
 
     const answer = newDate ?? (reruled ? first : date);
     return this.occurrence(
@@ -511,6 +515,7 @@ export class BlockOccurrencesService {
       },
     );
     const bumped = await this.blocks.update(tx, series.id);
+    await this.tasks.fitRemindersInBlock(tx, series.id, date);
     return this.occurrence(tx, bumped, date, row);
   }
 

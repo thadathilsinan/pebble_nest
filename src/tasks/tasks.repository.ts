@@ -6,21 +6,27 @@ import {
   gt,
   gte,
   inArray,
+  isNotNull,
   lt,
   lte,
   ne,
   not,
   or,
   sql,
+  type SQL,
 } from 'drizzle-orm';
+import { shapeOf } from '../blocks/blocks.mapper';
 import { addDays } from '../calendar/local-date';
 import type { Executor } from '../core/database/database.module';
 import {
+  blockOccurrenceExceptions,
+  blockSeries,
   taskLedgerEntries,
   taskSeries,
   tasks,
   type TaskRow,
 } from '../core/database/schema';
+import { fitReminder } from './reminder';
 import type { Settled } from './task-series';
 import type { TaskWithSeries } from './tasks.mapper';
 
@@ -259,7 +265,7 @@ export class TasksRepository {
       .returning();
 
     if (row === undefined) throw new Error('task vanished while locked');
-    return row;
+    return carry ? this.refit(ex, row) : row;
   }
 
   /**
@@ -299,7 +305,7 @@ export class TasksRepository {
       .returning();
 
     if (row === undefined) throw new Error('task vanished while locked');
-    return row;
+    return this.refit(ex, row);
   }
 
   /**
@@ -448,7 +454,7 @@ export class TasksRepository {
       .returning();
 
     if (row === undefined) throw new Error('task vanished while locked');
-    return row;
+    return this.refit(ex, row);
   }
 
   /**
@@ -502,6 +508,12 @@ export class TasksRepository {
       )
       .returning({ id: tasks.id });
 
+    if (reminder != null) {
+      await this.fitRemindersOf(
+        ex,
+        updated.map((row) => row.id),
+      );
+    }
     if (changes.title !== undefined && updated.length > 0) {
       await ex
         .update(taskLedgerEntries)
@@ -626,12 +638,6 @@ export class TasksRepository {
   }
 
   /**
-   * The caller's open tasks whose reminder falls from `from` to `to`, both
-   * included, in no particular order. Keyed on the reminder's date, not the
-   * task's. Uses `idx_tasks_user_id_reminder_date`, whose predicate `NOT done`
-   * repeats here so the planner can match it.
-   */
-  /**
    * What the user's ledger recorded from `from` to `to`, both included (DSH-02).
    * `incomplete` counts missed days too. A deleted task's days still count:
    * its entries outlive it.
@@ -705,6 +711,93 @@ export class TasksRepository {
       .limit(limit);
   }
 
+  /**
+   * Puts the reminder of each task `where` picks where `fitReminder` says,
+   * from its time of day, the task's date and the times of the occurrence
+   * it sits in, overrides included (decision 39). Called after every write
+   * that moves a task or changes its block's times. Bumps `version` on each
+   * task that changes, and returns those rows.
+   */
+  async fitReminders(ex: Executor, where: SQL | undefined): Promise<TaskRow[]> {
+    const rows = await ex
+      .select({
+        task: tasks,
+        block: blockSeries,
+        exception: blockOccurrenceExceptions,
+      })
+      .from(tasks)
+      .leftJoin(blockSeries, eq(blockSeries.id, tasks.blockSeriesId))
+      .leftJoin(
+        blockOccurrenceExceptions,
+        and(
+          eq(blockOccurrenceExceptions.blockSeriesId, tasks.blockSeriesId),
+          eq(blockOccurrenceExceptions.date, tasks.date),
+        ),
+      )
+      .where(and(where, isNotNull(tasks.reminderMin)));
+
+    const fitted: TaskRow[] = [];
+    for (const { task, block, exception } of rows) {
+      const reminder = fitReminder(
+        task.reminderMin!,
+        task.date,
+        block && shapeOf(block, exception),
+      );
+      if (
+        reminder.date === task.reminderDate &&
+        reminder.min === task.reminderMin
+      ) {
+        continue;
+      }
+      const [row] = await ex
+        .update(tasks)
+        .set({
+          reminderDate: reminder.date,
+          reminderMin: reminder.min,
+          version: sql`${tasks.version} + 1`,
+        })
+        .where(eq(tasks.id, task.id))
+        .returning();
+      if (row !== undefined) fitted.push(row);
+    }
+    return fitted;
+  }
+
+  /**
+   * `fitReminders` for the tasks in the block's occurrence on `date`, or
+   * without one, in every occurrence of the block.
+   */
+  async fitRemindersInBlock(
+    ex: Executor,
+    blockSeriesId: string,
+    date?: string,
+  ): Promise<void> {
+    await this.fitReminders(
+      ex,
+      and(
+        eq(tasks.blockSeriesId, blockSeriesId),
+        date === undefined ? undefined : eq(tasks.date, date),
+      ),
+    );
+  }
+
+  /** `fitReminders` for the tasks `ids` names. */
+  async fitRemindersOf(ex: Executor, ids: string[]): Promise<void> {
+    if (ids.length > 0) await this.fitReminders(ex, inArray(tasks.id, ids));
+  }
+
+  /** `row` after `fitReminders`, for a write that has just moved it. */
+  async refit(ex: Executor, row: TaskRow): Promise<TaskRow> {
+    const [fitted] = await this.fitReminders(ex, eq(tasks.id, row.id));
+    return fitted ?? row;
+  }
+
+  /**
+   * The caller's open tasks whose reminder falls from `from` to `to`, both
+   * included, in no particular order. Keyed on the reminder's date, not the
+   * task's. Uses `idx_tasks_user_id_reminder_date`, whose predicate `NOT done`
+   * repeats here so the planner can match it.
+   */
   findOpenRemindersBetween(
     ex: Executor,
     userId: string,

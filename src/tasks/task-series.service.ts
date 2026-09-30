@@ -83,9 +83,9 @@ export class TaskSeriesService {
 
   /**
    * Writes the occurrences whose reminder falls from `from` to `to`, both
-   * included, that have not been issued yet, for NTF-03. A reminder can be
-   * days from its occurrence's date, so each series is issued over the
-   * dates its reminders from `from` to `to` belong to.
+   * included, that have not been issued yet, for NTF-03. A reminder falls on
+   * its occurrence's day, or the next in a block crossing midnight
+   * (decision 39), so the series are issued from the day before `from`.
    */
   async issueRemindersBetween(
     ex: Executor,
@@ -93,14 +93,8 @@ export class TaskSeriesService {
     from: string,
     to: string,
   ): Promise<void> {
-    const byOffset = new Map<number, TaskSeriesRow[]>();
-    for (const row of await this.series.findWithReminders(ex, userId)) {
-      const offset = row.reminderDayOffset!;
-      byOffset.set(offset, [...(byOffset.get(offset) ?? []), row]);
-    }
-    for (const [offset, rows] of byOffset) {
-      await this.issue(ex, rows, addDays(from, -offset), addDays(to, -offset));
-    }
+    const rows = await this.series.findWithReminders(ex, userId);
+    await this.issue(ex, rows, addDays(from, -1), to);
   }
 
   /** `issueBetween` for these series. */
@@ -135,7 +129,9 @@ export class TaskSeriesService {
         }
       }
     }
-    await this.series.issue(ex, due);
+    // The series' time of day, fitted to each occurrence's own block times
+    // (decision 39).
+    await this.tasks.fitRemindersOf(ex, await this.series.issue(ex, due));
   }
 
   /** `BlockOccursOn` for the user's blocks from `from` to `to`. */

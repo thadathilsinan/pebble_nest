@@ -58,7 +58,10 @@ export type ErrorCode =
   | 'BLOCK_NOT_ON_DATE'
   // `repeatWithBlock` on a general-list task or with a block that does not
   // repeat, or `recurrence` on a task in a block.
-  | 'REPEAT_NOT_ALLOWED';
+  | 'REPEAT_NOT_ALLOWED'
+  // A task's reminder on another day than the task's, or outside the block
+  // it sits in (decision 39).
+  | 'REMINDER_OUT_OF_RANGE';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted

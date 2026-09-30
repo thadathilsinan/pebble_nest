@@ -423,6 +423,16 @@ Screen: task slip.
 For reminders, the series stores the time of day, and each occurrence gets that
 time on its own date.
 
+**Reminders sit with their task** (decision 39). A reminder falls on the task's
+own date. In a block it also falls within the occurrence's times, start and end
+included, and in a block crossing midnight it may fall early the next morning,
+before the block ends. Whatever moves a task (`/move`, carry-over, a skip or
+deleted block sending it to the general list, a block moving to another date)
+or changes its block's times (an edit in place, a split, an override) puts the
+reminder back on the task's date at the same time of day, and a time the
+block no longer covers goes to the block's start. Each task that changes this
+way bumps its `version`.
+
 **Moving** (TSK-03) between blocks, to the general list, or to another date. A
 repeating occurrence that moves splits off as a one-off, and the series carries
 on where it was.
@@ -445,8 +455,10 @@ that has already closed is carried forward right away.
 
 - `title` is trimmed, 1–200 characters (TSK-01). `notes` is at most 10,000
   characters and defaults to `''`. `reminderAt` is `YYYY-MM-DDTHH:mm` with no
-  offset and needn't fall on `date`; it is stored as a date plus minutes, like a
-  block's start. Unknown fields are `400 VALIDATION_FAILED`.
+  offset, stored as a date plus minutes, like a block's start. It must fall on
+  `date`, and within the block's occurrence for a task in one, or it is
+  `422 REMINDER_OUT_OF_RANGE` (decision 39). Unknown fields are
+  `400 VALIDATION_FAILED`.
 - `blockSeriesId` names an occurrence by its series and `date`, the day it
   starts. An unknown series, or someone else's, is `404 NOT_FOUND`. A series
   that doesn't fall on `date` is `422 BLOCK_NOT_ON_DATE`.
@@ -458,8 +470,8 @@ that has already closed is carried forward right away.
   `date`, which is its first occurrence even when its own rule doesn't land
   there. `recurrence` is stored with explicit days, as a block's is
   (decision 19), and an `until` before `date` is `400 VALIDATION_FAILED`.
-  The reminder repeats as the same time of day, the same number of days after
-  each occurrence's date.
+  The reminder repeats as the same time of day on each occurrence's date,
+  fitted to that occurrence's block times (decision 39).
 - **Closed days** (decision 22): a `date` before today in the user's time zone,
   or UTC if none has been reported, is closed. The task is created on today's
   general list with `carryCount` equal to the days passed, and each closed day
@@ -501,7 +513,8 @@ that has already closed is carried forward right away.
 **Edit (built):**
 
 - Strict body. `version` is required. `title`, `notes` and `reminderAt` follow
-  create's rules. An absent field is left alone, and `reminderAt: null` clears
+  create's rules, and a new `reminderAt` is checked against where the task
+  sits now. An absent field is left alone, and `reminderAt: null` clears
   the reminder. `date` and `blockSeriesId` are `400 VALIDATION_FAILED`: moving
   a task is `/move`'s job, and done is `/done`'s. An edit never moves or
   carries a task, not even a task sitting on a closed day.
@@ -518,7 +531,8 @@ that has already closed is carried forward right away.
 - **On an occurrence of a repeating task** (decision 36): a new title or
   reminder goes to the series and to its open occurrences dated after this
   one, each bumping its `version`; done ones keep theirs. A reminder keeps
-  its time of day and its distance in days from each occurrence's date.
+  its time of day on each occurrence's date, fitted to that occurrence's
+  block times.
   Notes go to the series and every occurrence, past ones included.
   `repeatWithBlock: false` or `recurrence: {kind: "none"}` stops the series
   here: this occurrence becomes a one-off, open occurrences already issued
@@ -609,12 +623,13 @@ is never sent to the server.
   `idx_tasks_user_id_reminder_date`. Done and missed tasks are left out.
   Ordered by `remindAt`, then title, then `taskId`.
 - Times already past today are included; the phone drops them when it
-  schedules. A task carried forward keeps its old `reminderAt`, so a reminder
-  on a past date is not scheduled again.
+  schedules. A task carried forward takes its reminder along to the same time
+  on its new day (decision 39), so an open task reminds again.
 - **Repeating task reminders** (NTF-03): before the reminders are read, each
-  series with a reminder issues the occurrences whose reminder falls in the
-  range, even when the occurrence's own date doesn't (a reminder the evening
-  before), so every reminder is a real task with an id (decision 37).
+  series with a reminder issues its occurrences from the day before the range
+  to its end, since a reminder in a block crossing midnight falls the morning
+  after its occurrence's date, so every reminder is a real task with an id
+  (decision 37).
 - It reads neither the session (decision 16) nor the user row, so a deleted
   account's token gets empty lists, as with `GET /days`.
 
@@ -757,6 +772,7 @@ request turns out to be slow.
 | 36 | Editing an occurrence of a repeating task follows the app: title and reminder reach the series and its later **open** occurrences, notes reach every occurrence, and turning the repeat off stops the series at this occurrence and deletes its later open copies, keeping done ones as one-offs. A changed own rule ends the old series here and starts a new one from this occurrence, with the done later copies' dates marked issued so they aren't doubled. `/move` splits an occurrence off as a one-off. `DELETE ?scope=series` deletes the named occurrence and every one from today on, and ends the series yesterday, or deletes it if it began today or later. The task row is locked before its series row. `PATCH` with the `Recurrence` exactly as it came back (`monthDays: []` on a weekly one) is still `400`, as for blocks. |
 | 37 | Tasks repeating with a block follow it, as in the app. A split ends each such series the day before and starts a copy on the new block from the split date, knowing the dates it already issued; one begun on or after that date moves across whole. A head move re-anchors the series anchored there. A block that stops repeating deletes its task series, making their tasks one-offs. Deleting a block from today on ends its task series yesterday and deletes their open copies from today on. Every task that skip, delete, a dropped occurrence or a move-one moves splits off as a one-off. An occurrence a block edit returns has its tasks issued first. `/notifications/schedule` issues each series over the dates its reminders in the window belong to. The block series is locked, then its tasks, then their task series, matching the task routes' task-then-series order. |
 | 38 | The day-end close is lazy: a global interceptor runs it before every signed-in request, reads and writes alike, except `DELETE /me`. It locks the user row, and if a day has closed since `users.closed_through` it issues the new closed days' repeating occurrences, settles every open task not recorded missed that sits before today (carried, or missed by REC-06), and moves `closed_through` to yesterday, in one transaction committed before the handler runs. It settles open tasks on any day before today, not only the days it covers, so an occurrence a read issued open on an already closed day is settled by the next close. `closed_through` only moves forward: travel west closes nothing again. A null `closed_through` settles every day before today, so accounts needed no backfill. Each instance remembers the last close of up to `DAY_CLOSE_CACHE_MAX_USERS` users (100,000 by default, least recently used forgotten first), so a request with no new day to close costs no read; `PATCH /me` forgets the user when `timeZone` is sent. A failed close fails the request. A block crossing midnight has its tasks carried at midnight, while its tail is still running, as the job would have. |
+| 39 | A task's reminder sits with the task: on its date, and within its block's occurrence, the next morning included for a block crossing midnight. `POST` and `PATCH /tasks` refuse one that doesn't with `422 REMINDER_OUT_OF_RANGE`. The time of day is what the user chose; the date follows the task. Every write that moves a task or changes its block's times refits the reminder through `TasksRepository.fitReminders`, from the task's date and its occurrence's times, overrides included: same time of day on the task's date, the next day for the small hours of a midnight-crossing block, and the block's start when the block no longer covers it. Issued occurrences of a series are fitted the same way. A carried task's reminder goes with it and rings again. Reminders written before this rule are left alone until something moves their task. |
 
 ## 11. Error codes to add
 
@@ -772,6 +788,7 @@ Append these to `src/core/http/error-code.ts`:
 | `BLOCK_TOO_SHORT` | 422 | BLK-05. **Added** (`POST /blocks`). `BLOCK_TOO_LONG` was dropped: minute-of-day start and end can't describe more than 24 hours. |
 | `BLOCK_NO_OCCURRENCE` | 422 | A repeating block whose `until` comes before the first day its rule lands on. **Added** (`POST /blocks`, decision 20). |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task or with a block that doesn't repeat, or `recurrence` on a task in a block. **Added** (`POST /tasks`). |
+| `REMINDER_OUT_OF_RANGE` | 422 | A task's `reminderAt` on another day than the task's, or outside the block occurrence it sits in (decision 39). **Added** (`POST /tasks`, `PATCH /tasks/{id}`). |
 | `BLOCK_NOT_ON_DATE` | 422 | A task put in a block on a date the block doesn't fall on. **Added** (`POST /tasks`). |
 | `ID_TOKEN_INVALID` | 401 | A Google or Apple ID token with a bad signature, another app's audience, the wrong issuer, an expired `exp`, or an unverified email; or an Apple authorization code Apple refuses. **Added** (`POST /auth/google`, `POST /auth/apple`). |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. **Not needed so far:** a create that inserts in one statement never exposes an unfinished original (decision 19). Add it only for a create that holds its insert open inside a longer transaction. |

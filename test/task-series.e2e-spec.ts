@@ -232,7 +232,7 @@ describe('Repeating tasks (e2e)', () => {
       title: 'Water plants',
       date: future,
       notes: 'The ones by the window',
-      reminderAt: `${addDays(future, 1)}T08:30`,
+      reminderAt: `${future}T08:30`,
       recurrence: { kind: 'weekly' },
     });
 
@@ -257,7 +257,7 @@ describe('Repeating tasks (e2e)', () => {
       blockSeriesId: null,
       title: 'Water plants',
       notes: 'The ones by the window',
-      reminderAt: `${addDays(next, 1)}T08:30`,
+      reminderAt: `${next}T08:30`,
       done: false,
       repeat: task.repeat,
     });
@@ -420,14 +420,14 @@ describe('Repeating tasks (e2e)', () => {
 
       await editTask(second!.id, {
         version: 0,
-        reminderAt: `${addDays(second!.date, 1)}T07:15`,
+        reminderAt: `${second!.date}T07:15`,
       });
 
       expect(await tasksOn(third!.date)).toMatchObject([
         {
           title: 'A',
           version: 1,
-          reminderAt: `${addDays(third!.date, 1)}T07:15`,
+          reminderAt: `${third!.date}T07:15`,
         },
       ]);
     });
@@ -755,7 +755,7 @@ describe('Repeating tasks (e2e)', () => {
     await createTask({
       title: 'Bins out',
       date: future,
-      reminderAt: `${addDays(future, -1)}T20:00`,
+      reminderAt: `${future}T20:00`,
       recurrence: { kind: 'daily' },
     });
     const day = addDays(future, 5);
@@ -769,9 +769,7 @@ describe('Repeating tasks (e2e)', () => {
         taskReminders: [{ title: 'Bins out', remindAt: `${day}T20:00` }],
       },
     });
-    expect(await tasksOn(addDays(day, 1))).toMatchObject([
-      { reminderAt: `${day}T20:00` },
-    ]);
+    expect(await tasksOn(day)).toMatchObject([{ reminderAt: `${day}T20:00` }]);
   });
 
   describe('on a closed day', () => {

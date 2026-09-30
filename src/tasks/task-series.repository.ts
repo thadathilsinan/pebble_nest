@@ -269,14 +269,15 @@ export class TaskSeriesRepository {
    * A series ended before the date since it was read issues nothing there.
    *
    * One statement over a JSON array rather than a row per bind parameter, so
-   * a long range of a daily series stays one round trip.
+   * a long range of a daily series stays one round trip. Returns the new
+   * tasks' ids.
    */
   async issue(
     ex: Executor,
     occurrences: { seriesId: string; date: string }[],
-  ): Promise<void> {
-    if (occurrences.length === 0) return;
-    await ex.execute(sql`
+  ): Promise<string[]> {
+    if (occurrences.length === 0) return [];
+    const { rows } = await ex.execute<{ id: string }>(sql`
       WITH issued AS (
         INSERT INTO ${taskSeriesIssuedDates} (task_series_id, date)
         SELECT s.id, o.date
@@ -293,7 +294,9 @@ export class TaskSeriesRepository {
         i.date + s.reminder_day_offset, s.reminder_min
       FROM issued i
       JOIN ${taskSeries} s ON s.id = i.task_series_id
+      RETURNING id
     `);
+    return rows.map((row) => row.id);
   }
 }
 
