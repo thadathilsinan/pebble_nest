@@ -28,6 +28,7 @@ const user: UserRow = {
   weekStart: 'monday',
   timeFormat: 'system',
   timeZone: null,
+  closedThrough: null,
   version: 0,
   createdAt: new Date(),
   updatedAt: new Date(),

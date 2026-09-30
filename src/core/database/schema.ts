@@ -81,6 +81,12 @@ export const users = pgTable(
     // Nullable: unknown until the client first reports it, which it does
     // silently on every app open (PATCH /me).
     timeZone: text('time_zone'),
+    // The last day the day-end close has settled (api-plan §7): every open
+    // task dated on or before it has been carried or recorded missed. Null
+    // until the first close, which settles every day before today. Kept
+    // rather than derived so a day skipped or repeated by travel closes
+    // exactly once.
+    closedThrough: date('closed_through', { mode: 'string' }),
     // schema-conventions §10: the profile is edited through PATCH /me from more
     // than one device.
     version: integer('version').notNull().default(0),

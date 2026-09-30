@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "closed_through" date;

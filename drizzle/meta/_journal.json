@@ -92,6 +92,13 @@
       "when": 1790266496394,
       "tag": "20260924161456_task_series",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790786320771,
+      "tag": "20260930163840_users_closed_through",
+      "breakpoints": true
     }
   ]
 }
