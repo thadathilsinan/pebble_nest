@@ -262,8 +262,7 @@ Screens: block slip, block sheet.
   `422 BLOCK_NOT_ON_DATE`); a stale `version` is `409 STALE_VERSION` with
   the occurrence in `meta.current`; then what the scope accepts, since that
   depends on whether the series repeats: `recurrence` with `onlyThis` on a
-  repeating block, and `newDate` with `thisAndFuture` on any but its first
-  occurrence, are `400 VALIDATION_FAILED`; then the values after the edit:
+  repeating block is `400 VALIDATION_FAILED`; then the values after the edit:
   `422 BLOCK_TOO_SHORT`, and for a new rule create's checks. A patch that
   changes nothing returns 200 and leaves `seriesVersion` alone; any real
   change bumps it, even one to a single occurrence (decision 30). The series
@@ -295,6 +294,17 @@ Screens: block slip, block sheet.
     the patch applied. The occurrence is deleted from its series, bumping
     `seriesVersion`, so naming it again is `404`. Its tasks, open and done,
     go with it, as an in-place move takes them. A skip stays behind.
+  - **`thisAndFuture` with `newDate` on a later occurrence** splits the
+    series there unchanged, then edits the new series from its first
+    occurrence as **In place** does: the occurrence moves to `newDate` with
+    its tasks, and the patch and any `recurrence` (anchored on `newDate`)
+    apply there; the rule must land on `newDate` or it is
+    `422 BLOCK_NOT_ON_DATE`. A `newDate` before `date` ends the old series
+    the day before `newDate`, so the two never share a day: the occurrences
+    it gives up go as deleted ones do (BLK-10), their tasks to their own
+    day's general list and the tasks repeating with it stopping there, and a
+    series left with no occurrence is deleted. One transaction; the answer
+    is the occurrence on `newDate`.
   - **`thisAndFuture` on a later occurrence** splits the series: it ends
     the day before, bumping `seriesVersion`, and a new series with a new
     `seriesId` starts on `date`, taking the series' own values with the

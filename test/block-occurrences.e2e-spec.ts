@@ -1109,28 +1109,19 @@ describe('Editing, skipping and deleting a block occurrence (e2e)', () => {
       expect(codeOf(res)).toBe('BLOCK_NOT_ON_DATE');
     });
 
-    it('refuses recurrence with onlyThis, and newDate with thisAndFuture past the first occurrence', async () => {
+    it('refuses recurrence with onlyThis', async () => {
       const seriesId = await postBlock({
         date: future,
         recurrence: { kind: 'daily' },
       });
-      const next = addDays(future, 1);
 
-      for (const res of [
-        await patch(seriesId, next, {
-          version: 0,
-          scope: 'onlyThis',
-          recurrence: { kind: 'weekly' },
-        }),
-        await patch(seriesId, next, {
-          version: 0,
-          scope: 'thisAndFuture',
-          newDate: addDays(next, 1),
-        }),
-      ]) {
-        expect(res.status).toBe(400);
-        expect(codeOf(res)).toBe('VALIDATION_FAILED');
-      }
+      const res = await patch(seriesId, addDays(future, 1), {
+        version: 0,
+        scope: 'onlyThis',
+        recurrence: { kind: 'weekly' },
+      });
+      expect(res.status).toBe(400);
+      expect(codeOf(res)).toBe('VALIDATION_FAILED');
     });
 
     it('with thisAndFuture on a later occurrence, splits the series there', async () => {

@@ -69,7 +69,8 @@ export class BlockOccurrencesService {
    * Edits the occurrence starting on `date` (`docs/api-plan.md` §4). A
    * block that doesn't repeat, or a series' first occurrence edited with
    * `thisAndFuture`, is the series itself, so the series is edited in place.
-   * A later occurrence with `thisAndFuture` splits the series there.
+   * A later occurrence with `thisAndFuture` splits the series there, and
+   * with `newDate` moves the new series' first occurrence there too.
    * `onlyThis` on a repeating block overrides that occurrence alone, or with
    * `newDate` moves it out as a one-off block.
    *
@@ -125,7 +126,7 @@ export class BlockOccurrencesService {
         return this.override(tx, found, date, body);
       }
       if (newDate !== undefined) {
-        throw invalid('Only this occurrence, or the first, can move.');
+        return this.splitAndMove(tx, found, date, { ...body, newDate }, today);
       }
       return this.split(tx, found, date, body, today);
     });
@@ -387,6 +388,92 @@ export class BlockOccurrencesService {
       return this.occurrence(tx, series, date, exception);
     }
 
+    const next = await this.splitAt(tx, series, date, shape, recurrence, today);
+    return this.occurrence(
+      tx,
+      next,
+      first,
+      await this.occurrences.find(tx, next.id, first),
+    );
+  }
+
+  /**
+   * `thisAndFuture` with `newDate` on a later occurrence: the series splits
+   * at `date` unchanged, and the new series is then edited from its first
+   * occurrence, as `editSeries` edits one, which moves it to `newDate` with
+   * its tasks and applies the patch and any new rule there.
+   *
+   * Moving it earlier ends the old series the day before `newDate`, so the
+   * two never share a day. The occurrences it gives up go as deleted ones
+   * do (BLK-10): their tasks to their own day's general list, and the tasks
+   * repeating with it stop there. A series left with no occurrence is
+   * deleted.
+   */
+  private async splitAndMove(
+    tx: Executor,
+    found: FoundOccurrence,
+    date: string,
+    body: UpdateOccurrenceBody & { newDate: string },
+    today: string,
+  ): Promise<BlockOccurrence> {
+    const { series } = found;
+    const { newDate } = body;
+    const next = await this.splitAt(
+      tx,
+      series,
+      date,
+      shapeOf(series),
+      recurrenceOf(series),
+      today,
+    );
+
+    if (newDate < date) {
+      const reach = { date: newDate, from: newDate };
+      let tasks = await this.tasks.findInSeriesForUpdate(
+        tx,
+        series.userId,
+        series.id,
+        reach,
+      );
+      // After the tasks' locks, as `delete` ends them.
+      await this.taskSeries.endWithBlock(tx, series.id, addDays(newDate, -1));
+      tasks = await this.tasks.findInSeriesForUpdate(
+        tx,
+        series.userId,
+        series.id,
+        reach,
+      );
+      await this.toGeneralList(tx, tasks, today);
+      if (firstOccurrenceOf(series) < newDate) {
+        await this.blocks.endBy(tx, series.id, addDays(newDate, -1));
+      } else {
+        await this.blocks.delete(tx, series.id);
+      }
+    }
+
+    const head = await this.blocks.findOccurrence(
+      tx,
+      series.userId,
+      next.id,
+      date,
+      { lock: true },
+    );
+    assertOccursOn(head, date);
+    return this.editSeries(tx, head, date, body, today);
+  }
+
+  /**
+   * Ends `series` the day before `date` and starts a new one there with
+   * `shape` and `recurrence`, as `split` describes, and answers with it.
+   */
+  private async splitAt(
+    tx: Executor,
+    series: BlockSeriesRow,
+    date: string,
+    shape: OccurrenceShape,
+    recurrence: Recurrence,
+    today: string,
+  ): Promise<BlockSeriesRow> {
     await this.blocks.endBy(tx, series.id, addDays(date, -1));
     const { row: next } = await this.blocks.create(tx, {
       userId: series.userId,
@@ -428,13 +515,7 @@ export class BlockOccurrencesService {
       date,
       recurrence.kind !== 'none',
     );
-
-    return this.occurrence(
-      tx,
-      next,
-      first,
-      await this.occurrences.find(tx, next.id, first),
-    );
+    return next;
   }
 
   /**
