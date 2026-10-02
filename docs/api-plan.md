@@ -406,6 +406,7 @@ Screen: task slip.
 | POST | `/tasks` | `{ title, date, blockSeriesId?, notes?, reminderAt?, repeatWithBlock?, recurrence?, idempotencyKey? }` | `Task` (201). **Built.** See below. |
 | PATCH | `/tasks/{id}` | `{ version, title?, notes?, reminderAt?, repeatWithBlock?, recurrence? }` | `Task` (200). **Built.** See below. |
 | PATCH | `/tasks/{id}/done` | `{ done }` | `Task` (200). **Built.** See below. |
+| PATCH | `/tasks/{id}/missed` | `{ missed }` | `Task` (200). **Built.** See below. |
 | POST | `/tasks/{id}/move` | `{ date, blockSeriesId }` | `Task` (200). **Built.** See below. |
 | DELETE | `/tasks/{id}` | `?scope=onlyThis\|series` | 204. **Built.** See below. |
 
@@ -516,6 +517,22 @@ time zone is `422 DATE_IN_PAST` (decision 40).
   Reopened, it is missed again where it is, with its `missed` entry back,
   since its day has already been settled. A repeating task reopened on a
   closed day settles as a closed-day create does, by its series (REC-06).
+
+**Skip a task (built):**
+
+- The user skips a task on purpose: `{ missed: true }`. It is not done, is
+  recorded `missed` on its day at once, and is never carried over or reminded
+  of. A done task skipped loses its tick: `missed` replaces `completed`.
+  `{ missed: false }` takes the skip back: open again, its day's entry gone.
+  An occurrence of a repeating task is skipped alone; the series carries on.
+- `{ missed }` only, strict, no `version`, last write wins, as `/done`.
+  Sending the value the task already has returns it unchanged.
+- Only on today or a later day. A task on a closed day is `422 DAY_CLOSED`
+  either way: what its day recorded stays (decision 40).
+- Ticking a task skipped on today or later clears the skip (`completed`
+  replaces `missed`); reopened, it is simply open. Moving a missed task opens
+  it where it goes: a closed day keeps its `missed` entry, an open day's goes.
+- The review counts a skip as it counts any missed task: incomplete (DSH-02).
 
 **Edit (built):**
 

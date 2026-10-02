@@ -21,6 +21,7 @@ import type { CreateTaskBody } from './dto/create-task.dto';
 import type { DeleteTaskQuery } from './dto/delete-task.dto';
 import type { MoveTaskBody } from './dto/move-task.dto';
 import type { SetTaskDoneBody } from './dto/set-task-done.dto';
+import type { SetTaskMissedBody } from './dto/set-task-missed.dto';
 import type { UpdateTaskBody } from './dto/update-task.dto';
 import { assertReminderFits, type BlockTimes } from './reminder';
 import { ownRecurrenceOf } from './task-series';
@@ -143,6 +144,9 @@ export class TasksService {
    * round again (REC-06). A missed task reopened is missed again, where it
    * is, since its day has been settled already.
    *
+   * Ticking a task skipped on today or a later day (`/missed`) clears the
+   * skip: done replaces it, and reopened it is simply open.
+   *
    * Sending the value the task already has changes nothing, not even
    * `version`. It does not read the session (decision 16).
    */
@@ -160,7 +164,13 @@ export class TasksService {
       if (found.done === body.done) return task;
 
       if (body.done) {
-        const done = await this.tasks.setDone(tx, found.id, true);
+        const done = await this.tasks.setDone(
+          tx,
+          found.id,
+          true,
+          undefined,
+          found.missed && found.date >= today,
+        );
         await this.tasks.recordCompleted(tx, done);
         return { ...task, task: done };
       }
@@ -189,6 +199,45 @@ export class TasksService {
       });
       await this.tasks.recordSettled(tx, carried, found.date, settled, today);
       return { ...task, task: carried };
+    });
+
+    return toTask(row);
+  }
+
+  /**
+   * Skips a task, or takes the skip back. Skipped, it is `missed`: not done,
+   * recorded missed on its day at once, and never carried over or reminded
+   * of. A done task skipped loses its tick, `missed` replacing `completed`.
+   * Taken back, it is open again and its day's entry goes. An occurrence of
+   * a repeating task is skipped alone; its series carries on.
+   *
+   * Only a task on today or a later day: a closed day has settled what is on
+   * it, so a change there is `422 DAY_CLOSED` (decision 40).
+   *
+   * Sending the value the task already has changes nothing, not even
+   * `version`. It does not read the session (decision 16).
+   */
+  async setMissed(
+    caller: Caller,
+    id: string,
+    body: SetTaskMissedBody,
+  ): Promise<Task> {
+    const today = await this.todayFor(caller);
+
+    const row = await this.db.transaction(async (tx) => {
+      const found = await this.tasks.findForUpdate(tx, caller.userId, id);
+      if (found === null) throw taskNotFound();
+      const task = await this.withSeries(tx, found);
+      if (found.missed === body.missed) return task;
+      if (found.date < today) throw dayClosed();
+
+      const changed = await this.tasks.setMissed(tx, found.id, body.missed);
+      if (body.missed) {
+        await this.tasks.recordMissed(tx, changed);
+      } else {
+        await this.tasks.clearDay(tx, found.id, found.date);
+      }
+      return { ...task, task: changed };
     });
 
     return toTask(row);
@@ -321,12 +370,16 @@ export class TasksService {
    * counts for. Days an open task had already carried through keep the
    * entry they have.
    *
+   * A missed task moved is open where it goes. A closed day keeps the
+   * `missed` it recorded; an open day's skip is taken back.
+   *
    * No `version`: the last write wins, and a real move bumps `version`.
    * Moving a task to where it already is changes nothing. It does not read
    * the session (decision 16).
    */
   async move(caller: Caller, id: string, body: MoveTaskBody): Promise<Task> {
-    assertNotPast(body.date, await this.todayFor(caller));
+    const today = await this.todayFor(caller);
+    assertNotPast(body.date, today);
 
     const row = await this.db.transaction(async (tx) => {
       const task = await this.tasks.findForUpdate(tx, caller.userId, id);
@@ -355,15 +408,20 @@ export class TasksService {
           ...body,
           carryDays: 0,
           splitOff: true,
+          reopen: true,
         });
         await this.tasks.recordCompleted(tx, moved);
         return moved;
       }
 
+      if (task.missed && task.date >= today) {
+        await this.tasks.clearDay(tx, task.id, task.date);
+      }
       return this.tasks.move(tx, task.id, {
         ...body,
         carryDays: 0,
         splitOff: true,
+        reopen: true,
       });
     });
 

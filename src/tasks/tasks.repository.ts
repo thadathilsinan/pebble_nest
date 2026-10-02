@@ -244,14 +244,16 @@ export class TasksRepository {
    * Marks the task done, stamping `doneAt` with the database's clock, or
    * open again. A reopened task on a closed day is `carry`-ed in the same
    * write: to `carry.date`, `carry.days` carries further on, and out of its
-   * block if that takes it off its day. Bumps `version` once either way. The
-   * caller has checked `done` changes.
+   * block if that takes it off its day. `unmiss` clears `missed` in the
+   * same write. Bumps `version` once either way. The caller has checked
+   * `done` changes.
    */
   async setDone(
     ex: Executor,
     id: string,
     done: boolean,
     carry?: Carry,
+    unmiss = false,
   ): Promise<TaskRow> {
     const [row] = await ex
       .update(tasks)
@@ -259,6 +261,7 @@ export class TasksRepository {
         done,
         doneAt: done ? sql`now()` : null,
         version: sql`${tasks.version} + 1`,
+        ...(unmiss && { missed: false }),
         ...(carry && carried(carry)),
       })
       .where(eq(tasks.id, id))
@@ -266,6 +269,26 @@ export class TasksRepository {
 
     if (row === undefined) throw new Error('task vanished while locked');
     return carry ? this.refit(ex, row) : row;
+  }
+
+  /**
+   * Marks the task missed, open and not done, or not missed again, and bumps
+   * `version`. The caller holds the row's lock and has checked `missed`
+   * changes.
+   */
+  async setMissed(ex: Executor, id: string, missed: boolean): Promise<TaskRow> {
+    const [row] = await ex
+      .update(tasks)
+      .set({
+        missed,
+        ...(missed && { done: false, doneAt: null }),
+        version: sql`${tasks.version} + 1`,
+      })
+      .where(eq(tasks.id, id))
+      .returning();
+
+    if (row === undefined) throw new Error('task vanished while locked');
+    return row;
   }
 
   /**
@@ -428,8 +451,9 @@ export class TasksRepository {
    * Puts the task on `to.date`, in `to.blockSeriesId`'s occurrence or on the
    * general list, and bumps `version` once. `carryDays` adds carries, for a
    * task moved onto a closed day and carried on from there. `splitOff`
-   * makes an occurrence of a repeating task a one-off (TSK-03). The caller
-   * holds the row's lock and has checked the place changes.
+   * makes an occurrence of a repeating task a one-off (TSK-03). `reopen`
+   * clears `missed`: the task is open where it goes. The caller holds the
+   * row's lock and has checked the place changes.
    */
   async move(
     ex: Executor,
@@ -439,6 +463,7 @@ export class TasksRepository {
       blockSeriesId: string | null;
       carryDays: number;
       splitOff?: boolean;
+      reopen?: boolean;
     },
   ): Promise<TaskRow> {
     const [row] = await ex
@@ -449,6 +474,7 @@ export class TasksRepository {
         carryCount: sql`${tasks.carryCount} + ${to.carryDays}`,
         version: sql`${tasks.version} + 1`,
         ...(to.splitOff && { taskSeriesId: null }),
+        ...(to.reopen && { missed: false }),
       })
       .where(eq(tasks.id, id))
       .returning();

@@ -65,13 +65,14 @@ export function toTask({ task: row, series }: TaskWithSeries): Task {
 }
 
 /**
- * The order the app shows a list of tasks in: open before done, then the most
- * carried first, so a task put off again and again sits where it cannot be
- * missed, then title A–Z. The id settles ties so the order is stable.
+ * The order the app shows a list of tasks in: open before settled (done or
+ * missed), then the most carried first, so a task put off again and again
+ * sits where it cannot be overlooked, then title A–Z. The id settles ties so
+ * the order is stable.
  */
 export function compareTasks(a: Task, b: Task): number {
   return (
-    Number(a.done) - Number(b.done) ||
+    Number(a.done || a.missed) - Number(b.done || b.missed) ||
     b.carryCount - a.carryCount ||
     // Lower-cased and compared by code unit, as the app's `_taskOrder` does,
     // rather than by locale, so both sides agree on every title.

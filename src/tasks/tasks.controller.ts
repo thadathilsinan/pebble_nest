@@ -14,6 +14,7 @@ import { CreateTaskBody } from './dto/create-task.dto';
 import { DeleteTaskQuery } from './dto/delete-task.dto';
 import { MoveTaskBody } from './dto/move-task.dto';
 import { SetTaskDoneBody, TaskIdParams } from './dto/set-task-done.dto';
+import { SetTaskMissedBody } from './dto/set-task-missed.dto';
 import { UpdateTaskBody } from './dto/update-task.dto';
 import { TasksService } from './tasks.service';
 
@@ -42,6 +43,15 @@ export class TasksController {
     @Body() body: SetTaskDoneBody,
   ) {
     return this.tasks.setDone(caller, id, body);
+  }
+
+  @Patch(':id/missed')
+  setMissed(
+    @CurrentCaller() caller: Caller,
+    @Param() { id }: TaskIdParams,
+    @Body() body: SetTaskMissedBody,
+  ) {
+    return this.tasks.setMissed(caller, id, body);
   }
 
   // An action on the task, not a create, so 200 rather than POST's 201.
