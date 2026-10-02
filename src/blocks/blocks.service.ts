@@ -5,6 +5,8 @@ import { BlockNamesRepository } from '../block-names/block-names.repository';
 import { firstOccurrenceFrom, resolveRecurrence } from '../calendar/recurrence';
 import { DB, type Db } from '../core/database/database.module';
 import type { BlockSeriesRow } from '../core/database/schema';
+import { assertNotPast, todayFor } from '../users/today';
+import { UsersRepository } from '../users/users.repository';
 import { assertLongEnough, noOccurrence } from './block-occurrence';
 import {
   recurrenceOf,
@@ -20,12 +22,14 @@ export class BlocksService {
     @Inject(DB) private readonly db: Db,
     private readonly blocks: BlocksRepository,
     private readonly names: BlockNamesRepository,
+    private readonly users: UsersRepository,
   ) {}
 
   /**
    * Creates a block series and returns its first occurrence: the first day on
    * or after `date` that the recurrence lands on. That is `date` itself unless
    * the rule skips it, e.g. a weekly block of Mondays created on a Wednesday.
+   * `date` must not be before today in the user's time zone.
    *
    * A retry carrying the same `idempotencyKey` returns the series the first
    * request created, as that request would have, whatever the retry's body
@@ -39,6 +43,10 @@ export class BlocksService {
     body: CreateBlockBody,
   ): Promise<BlockOccurrence> {
     assertLongEnough(body);
+    assertNotPast(
+      body.date,
+      todayFor(await this.users.findById(this.db, caller.userId)),
+    );
 
     const recurrence = resolveRecurrence(body.recurrence, body.date);
     if (firstOccurrenceFrom(recurrence, body.date, body.date) === null) {

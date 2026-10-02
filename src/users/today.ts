@@ -1,6 +1,8 @@
+import { UnprocessableEntityException } from '@nestjs/common';
 import { accessTokenInvalid } from '../auth/errors';
 import { nowIn, todayIn } from '../calendar/local-date';
 import type { UserRow } from '../core/database/schema';
+import type { ErrorCode } from '../core/http/error-code';
 
 /**
  * The zone a user's days are read in before the device has reported one. The
@@ -25,4 +27,30 @@ export function todayFor(user: UserRow | null): string {
 export function nowFor(user: UserRow | null): { date: string; minute: number } {
   if (user === null) throw accessTokenInvalid();
   return nowIn(user.timeZone ?? FALLBACK_TIME_ZONE);
+}
+
+/**
+ * Refuses a block or task created or moved onto a day before the user's
+ * `today`: a closed day takes no new plans (decision 40).
+ */
+export function assertNotPast(date: string, today: string): void {
+  if (date < today) {
+    throw new UnprocessableEntityException({
+      code: 'DATE_IN_PAST' satisfies ErrorCode,
+      message: 'Blocks and tasks can only be put on today or a later day.',
+    });
+  }
+}
+
+/**
+ * An edit to what sits on a day before the user's today. A closed day's
+ * blocks and tasks can only be moved off it or deleted, and its tasks
+ * ticked or un-ticked (decision 40).
+ */
+export function dayClosed(): UnprocessableEntityException {
+  return new UnprocessableEntityException({
+    code: 'DAY_CLOSED' satisfies ErrorCode,
+    message:
+      'That day has closed. What is on it can be moved or deleted, not edited.',
+  });
 }

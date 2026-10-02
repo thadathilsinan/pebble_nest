@@ -40,7 +40,7 @@ import type { ErrorCode } from '../core/http/error-code';
 import { TaskSeriesService } from '../tasks/task-series.service';
 import { compareTasks, toTask } from '../tasks/tasks.mapper';
 import { TasksRepository } from '../tasks/tasks.repository';
-import { todayFor } from '../users/today';
+import { assertNotPast, dayClosed, todayFor } from '../users/today';
 import { UsersRepository } from '../users/users.repository';
 import { BlockOccurrencesRepository } from './block-occurrences.repository';
 import type { DeleteScope } from './dto/delete-occurrence.dto';
@@ -73,6 +73,10 @@ export class BlockOccurrencesService {
    * with `newDate` moves the new series' first occurrence there too.
    * `onlyThis` on a repeating block overrides that occurrence alone, or with
    * `newDate` moves it out as a one-off block.
+   *
+   * Nothing is moved onto a day before today, `422 DATE_IN_PAST`. An
+   * occurrence on a closed day can only be moved off it, by itself, to new
+   * hours if it likes; any other edit is `422 DAY_CLOSED` (decision 40).
    *
    * A stale `version` is a 409 carrying the occurrence as it is, checked
    * before which fields the scope accepts, since those depend on whether the
@@ -110,6 +114,17 @@ export class BlockOccurrencesService {
 
       const newDate = body.newDate === date ? undefined : body.newDate;
       const repeats = series.recurrenceKind !== 'none';
+      if (newDate !== undefined) assertNotPast(newDate, today);
+      if (
+        date < today &&
+        (newDate === undefined ||
+          (repeats && body.scope === 'thisAndFuture') ||
+          body.name !== undefined ||
+          body.alert !== undefined ||
+          body.recurrence !== undefined)
+      ) {
+        throw dayClosed();
+      }
       if (
         !repeats ||
         (body.scope === 'thisAndFuture' && date === firstOccurrenceOf(series))
@@ -134,10 +149,8 @@ export class BlockOccurrencesService {
 
   /**
    * Skips one occurrence (BLK-07). Its open tasks move to that day's general
-   * list, and its done tasks stay where they were done. An open task on a
-   * day that has already closed is carried forward at once, as `/move`
-   * carries one moved there (decision 26): to today's general list, with one
-   * carry and one `incomplete` entry per closed day.
+   * list, and its done tasks stay where they were done. An occurrence on a
+   * day that has closed can't be skipped, `422 DAY_CLOSED` (decision 40).
    *
    * No `version`: skipped is an absolute value, so the last write wins, and
    * skipping again moves whatever has arrived since, normally nothing. It
@@ -157,6 +170,7 @@ export class BlockOccurrencesService {
         }),
         date,
       );
+      if (date < today) throw dayClosed();
       await this.occurrences.skip(tx, caller.userId, seriesId, date);
 
       const open = await this.tasks.findOpenInOccurrenceForUpdate(
@@ -171,16 +185,19 @@ export class BlockOccurrencesService {
 
   /**
    * Un-skips one occurrence (BLK-08). Tasks the skip moved stay where they
-   * went. Un-skipping an occurrence that isn't skipped changes nothing.
+   * went. Un-skipping an occurrence that isn't skipped changes nothing. An
+   * occurrence on a day that has closed stays as it is, `422 DAY_CLOSED`
+   * (decision 40).
    *
-   * It reads no user row, so a token whose account is gone gets the 404 its
-   * vanished series gives. It does not read the session (decision 16).
+   * It does not read the session (decision 16).
    */
   async unskip(caller: Caller, seriesId: string, date: string): Promise<void> {
+    const today = todayFor(await this.users.findById(this.db, caller.userId));
     assertOccursOn(
       await this.blocks.findOccurrence(this.db, caller.userId, seriesId, date),
       date,
     );
+    if (date < today) throw dayClosed();
     await this.occurrences.unskip(this.db, seriesId, date);
   }
 

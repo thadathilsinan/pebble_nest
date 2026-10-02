@@ -15,7 +15,7 @@ import { resolveRecurrence, type Recurrence } from '../calendar/recurrence';
 import { DB, type Db, type Executor } from '../core/database/database.module';
 import type { TaskRow, TaskSeriesRow } from '../core/database/schema';
 import type { ErrorCode } from '../core/http/error-code';
-import { todayFor } from '../users/today';
+import { assertNotPast, dayClosed, todayFor } from '../users/today';
 import { UsersRepository } from '../users/users.repository';
 import type { CreateTaskBody } from './dto/create-task.dto';
 import type { DeleteTaskQuery } from './dto/delete-task.dto';
@@ -52,14 +52,8 @@ export class TasksService {
    * `date` even when its rule doesn't land there, as in the app, and its
    * later occurrences are issued as their dates are read.
    *
-   * Any date is accepted (TSK-05), past included. A task put on a day that
-   * has already closed is settled at once, as the day-end close would have
-   * settled it (decision 2): carried to today's general list with one
-   * `incomplete` entry per closed day it passed through, or, if its series
-   * comes round again first, recorded missed on the day before that
-   * (REC-06). The response shows where it ended up. The series' other
-   * closed-day occurrences are issued open when read, like any other day's.
-   * "Closed" means before today in the user's time zone.
+   * `date` must not be before today in the user's time zone: a day that has
+   * already closed takes no new tasks (decision 40).
    *
    * A retry carrying the same `idempotencyKey` returns the task the first
    * request created, whatever the retry's body says, and writes no series or
@@ -74,6 +68,7 @@ export class TasksService {
     if ((ownRepeat && inBlock) || (withBlock && !inBlock)) {
       throw repeatNotAllowed();
     }
+    assertNotPast(body.date, await this.todayFor(caller));
 
     let block: BlockTimes | null = null;
     if (body.blockSeriesId != null) {
@@ -109,51 +104,29 @@ export class TasksService {
           }
         : null;
 
-    const today = await this.todayFor(caller);
-
     const created = await this.db.transaction(async (tx) => {
-      const settled =
-        body.date < today
-          ? await this.series.settleClosed(
-              tx,
-              caller.userId,
-              series && { ...series, endedOn: null },
-              body.date,
-              today,
-            )
-          : null;
-
       const { row, created } = await this.tasks.create(tx, {
         userId: caller.userId,
-        blockSeriesId:
-          settled !== null && settled.carryDays > 0
-            ? // A carried task arrives on the next day's general list (TSK-06).
-              null
-            : (body.blockSeriesId ?? null),
-        date: settled?.date ?? body.date,
+        blockSeriesId: body.blockSeriesId ?? null,
+        date: body.date,
         title: body.title,
         notes: body.notes ?? '',
         reminderDate: body.reminderAt?.date ?? null,
         reminderMin: body.reminderAt?.min ?? null,
-        carryCount: settled?.carryDays ?? 0,
-        missed: settled?.missed ?? false,
+        carryCount: 0,
+        missed: false,
         idempotencyKey: body.idempotencyKey,
       });
       if (!created) return this.withSeries(tx, row);
 
-      // A task carried off its day takes its reminder along (decision 39).
-      const placed = settled === null ? row : await this.tasks.refit(tx, row);
       const task =
         series === null
-          ? placed
+          ? row
           : await this.tasks.linkSeries(
               tx,
               row.id,
               (await this.taskSeries.create(tx, series)).id,
             );
-      if (settled !== null) {
-        await this.tasks.recordSettled(tx, task, body.date, settled, today);
-      }
       return this.withSeries(tx, task);
     });
 
@@ -234,20 +207,24 @@ export class TasksService {
    * this occurrence. Turning a repeat on starts a series from this task, by
    * `create`'s rules for where it sits.
    *
+   * A task on a day that has closed can't be edited: a patch that would
+   * change it is `422 DAY_CLOSED` (decision 40).
+   *
    * A stale `version` is a 409 carrying the task as it now is. A patch that
    * changes nothing returns the task without bumping `version`. A new title
    * reaches every day the task has recorded (decision 25). The task row is
    * locked for the write, then its series' row, so that rename and the
    * version check cannot interleave with another device's.
    *
-   * It reads no user row, so a token whose account is gone gets the 404 its
-   * vanished tasks give. It does not read the session (decision 16).
+   * It does not read the session (decision 16).
    */
   async update(
     caller: Caller,
     id: string,
     body: UpdateTaskBody,
   ): Promise<Task> {
+    const today = await this.todayFor(caller);
+
     const row = await this.db.transaction(async (tx) => {
       const task = await this.tasks.findForUpdate(tx, caller.userId, id);
       if (task === null) throw taskNotFound();
@@ -269,6 +246,12 @@ export class TasksService {
 
       const repeat = await this.repeatChange(tx, task, series, body);
       const changes = changesTo(task, body);
+      if (
+        task.date < today &&
+        (changes !== undefined || repeat.kind !== 'keep')
+      ) {
+        throw dayClosed();
+      }
       if (changes?.reminderDate != null) {
         assertReminderFits(
           { date: changes.reminderDate, min: changes.reminderMin! },
@@ -329,22 +312,21 @@ export class TasksService {
   /**
    * Moves a task between blocks, to the general list, or to another date
    * (TSK-03). Its tasks-in-a-block rule is create's: the block must be the
-   * caller's and fall on `date`.
+   * caller's and fall on `date`, and `date` must not be before today
+   * (decision 40). A task on a closed day can be moved off it.
    *
    * An occurrence of a repeating task splits off as a one-off, and its series
    * carries on where it was without it (TSK-03). A done task takes its
    * `completed` entry with it, so the day it now sits on is the day it
-   * counts for. An open task moved onto a day that has
-   * already closed is carried forward at once, as `create` carries one put
-   * there (decision 2). Days it had already carried through keep the entry
-   * they have.
+   * counts for. Days an open task had already carried through keep the
+   * entry they have.
    *
    * No `version`: the last write wins, and a real move bumps `version`.
    * Moving a task to where it already is changes nothing. It does not read
    * the session (decision 16).
    */
   async move(caller: Caller, id: string, body: MoveTaskBody): Promise<Task> {
-    const today = await this.todayFor(caller);
+    assertNotPast(body.date, await this.todayFor(caller));
 
     const row = await this.db.transaction(async (tx) => {
       const task = await this.tasks.findForUpdate(tx, caller.userId, id);
@@ -378,27 +360,11 @@ export class TasksService {
         return moved;
       }
 
-      if (body.date >= today) {
-        return this.tasks.move(tx, task.id, {
-          ...body,
-          carryDays: 0,
-          splitOff: true,
-        });
-      }
-
-      const carried = await this.tasks.move(tx, task.id, {
-        date: today,
-        blockSeriesId: null,
-        carryDays: daysBetween(body.date, today),
+      return this.tasks.move(tx, task.id, {
+        ...body,
+        carryDays: 0,
         splitOff: true,
       });
-      await this.tasks.recordIncomplete(
-        tx,
-        carried,
-        body.date,
-        addDays(today, -1),
-      );
-      return carried;
     });
 
     return toTask(await this.withSeries(this.db, row));

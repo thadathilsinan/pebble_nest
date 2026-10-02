@@ -61,7 +61,14 @@ export type ErrorCode =
   | 'REPEAT_NOT_ALLOWED'
   // A task's reminder on another day than the task's, or outside the block
   // it sits in (decision 39).
-  | 'REMINDER_OUT_OF_RANGE';
+  | 'REMINDER_OUT_OF_RANGE'
+  // A block or task created, or moved, onto a day before the user's today.
+  // Days that have closed take no new plans.
+  | 'DATE_IN_PAST'
+  // An edit to a block or task on a day before the user's today. What sits
+  // on a closed day can be moved off it or deleted, a task ticked or
+  // un-ticked, and nothing else.
+  | 'DAY_CLOSED';
 
 /**
  * The default code for each status Nest can produce on its own. Only consulted

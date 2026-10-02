@@ -234,8 +234,8 @@ Screens: block slip, block sheet.
 - **Validation:** name is 1–60 characters after trimming. Length is at least 5
   minutes, otherwise `422 BLOCK_TOO_SHORT` (BLK-05). `endMin = startMin` is a full
   24 hours, which is also the most minute-of-day values can express, so there is
-  no too-long case. Blocks may overlap (BLK-03). Any date is accepted, past
-  included.
+  no too-long case. Blocks may overlap (BLK-03). A `date` before today in the
+  user's time zone is `422 DATE_IN_PAST` (decision 40).
 - **Create (built):** `recurrence` is optional, and leaving it out means `none`.
   `weekdays` is accepted only with `weekly`, `monthDays` only with `monthly`, and
   `until` only with a kind that repeats, on or after `date`. An empty or missing
@@ -279,8 +279,8 @@ Screens: block slip, block sheet.
     has move to their own day's general list, as a deleted occurrence's do.
     `newDate` moves the anchor, and the rule must land on it or it is
     `422 BLOCK_NOT_ON_DATE`; the occurrence's tasks go with it (BLK-09),
-    a done one taking its `completed` entry along, an open one landing on a
-    closed day carrying on to today as `/move` carries it. Its skip and
+    a done one taking its `completed` entry along. A `newDate` before today
+    is `422 DATE_IN_PAST` (decision 40). Its skip and
     overrides go too, unless the new date has its own.
   - **`onlyThis`** on a repeating block overrides that occurrence alone:
     its `name`, `startMin`, `endMin` and `alert`, held in its
@@ -363,11 +363,8 @@ Screens: block slip, block sheet.
   created. There is no `version` and the last write wins, as with
   `/tasks/{id}/done`, and skipping doesn't bump `seriesVersion`. The
   occurrence's open tasks move to that day's general list, each bumping its
-  `version`; done tasks stay in the block. **An open task on a closed day
-  carries forward at once**, as `/tasks/{id}/move` carries one (decision 26):
-  to today's general list, `carryCount` up by the days passed, and an
-  `incomplete` entry for each closed day from `date` to yesterday.
-  `movedTaskCount` counts those too. Skipping again answers 200 with whatever
+  `version`; done tasks stay in the block. An occurrence on a closed day
+  can't be skipped or un-skipped, `422 DAY_CLOSED` (decision 40). Skipping again answers 200 with whatever
   arrived since, normally 0. The open tasks are locked, so two devices
   skipping at once move each task once. A deleted account's token gets
   `401 TOKEN_INVALID`, because skip reads the user's time zone.
@@ -458,8 +455,8 @@ is a day that has already closed, it is carried forward right away** (§7).
 | `onlyThis` (the default) | Deletes this occurrence. It never comes back. |
 | `series` | Deletes every occurrence from today onward and ends the series. Occurrences before today stay in the history, so the dashboard is unchanged. |
 
-**Creating** a task works for any date, past included. A task created on a day
-that has already closed is carried forward right away.
+**Creating** a task works from today on. A `date` before today in the user's
+time zone is `422 DATE_IN_PAST` (decision 40).
 
 **Create (built):**
 
@@ -573,14 +570,10 @@ that has already closed is carried forward right away.
 - **An occurrence of a repeating task that moves splits off as a one-off**
   (`repeat: null`). Its series carries on and never issues that date again.
 - **A done task takes its `completed` entry with it** to the day it now sits
-  on, replacing whatever that day held for it. It stays on a closed day it is
-  moved to.
-- **An open task moved onto a closed day carries forward at once**, as a
-  closed-day create does: to today's general list, `carryCount` up by the days
-  passed, and an `incomplete` entry for each closed day from `date` to
-  yesterday. A day that already has an entry for the task, because it carried
-  through it before, keeps that entry. `carryCount` still counts the carry
-  again.
+  on, replacing whatever that day held for it.
+- **Nothing is moved onto a closed day:** a `date` before today is
+  `422 DATE_IN_PAST` (decision 40). A task on a closed day can be moved off
+  it, to today or later.
 - The row is locked for the write. A deleted account's token gets
   `401 TOKEN_INVALID`, because the move reads the user's time zone. It does not
   read the session (decision 16).
@@ -745,7 +738,7 @@ request turns out to be slow.
 | # | Decision |
 |---|---|
 | 1 | Tasks in a block repeat with the block. General-list tasks repeat on their own. |
-| 2 | A task created on, or un-ticked on, a closed day is carried forward right away. |
+| 2 | A task un-ticked on a closed day is carried forward right away. Creating one on a closed day is refused (decision 40). |
 | 3 | Deleting a repeating task **or block** offers "only this one" or "the whole series". "The whole series" removes today's and future occurrences; past ones stay. Editing a block still offers "only this one" / "this and all future ones". |
 | 4 | Most carried-over uses the SRS rule ("active in the period"). |
 | 5 | Done is per occurrence. Notes apply to every occurrence, past included. Title and reminder apply to this occurrence and future ones. |
@@ -783,6 +776,7 @@ request turns out to be slow.
 | 37 | Tasks repeating with a block follow it, as in the app. A split ends each such series the day before and starts a copy on the new block from the split date, knowing the dates it already issued; one begun on or after that date moves across whole. A head move re-anchors the series anchored there. A block that stops repeating deletes its task series, making their tasks one-offs. Deleting a block from today on ends its task series yesterday and deletes their open copies from today on. Every task that skip, delete, a dropped occurrence or a move-one moves splits off as a one-off. An occurrence a block edit returns has its tasks issued first. `/notifications/schedule` issues each series over the dates its reminders in the window belong to. The block series is locked, then its tasks, then their task series, matching the task routes' task-then-series order. |
 | 38 | The day-end close is lazy: a global interceptor runs it before every signed-in request, reads and writes alike, except `DELETE /me`. It locks the user row, and if a day has closed since `users.closed_through` it issues the new closed days' repeating occurrences, settles every open task not recorded missed that sits before today (carried, or missed by REC-06), and moves `closed_through` to yesterday, in one transaction committed before the handler runs. It settles open tasks on any day before today, not only the days it covers, so an occurrence a read issued open on an already closed day is settled by the next close. `closed_through` only moves forward: travel west closes nothing again. A null `closed_through` settles every day before today, so accounts needed no backfill. Each instance remembers the last close of up to `DAY_CLOSE_CACHE_MAX_USERS` users (100,000 by default, least recently used forgotten first), so a request with no new day to close costs no read; `PATCH /me` forgets the user when `timeZone` is sent. A failed close fails the request. A block crossing midnight has its tasks carried at midnight, while its tail is still running, as the job would have. |
 | 39 | A task's reminder sits with the task: on its date, and within its block's occurrence, the next morning included for a block crossing midnight. `POST` and `PATCH /tasks` refuse one that doesn't with `422 REMINDER_OUT_OF_RANGE`. The time of day is what the user chose; the date follows the task. Every write that moves a task or changes its block's times refits the reminder through `TasksRepository.fitReminders`, from the task's date and its occurrence's times, overrides included: same time of day on the task's date, the next day for the small hours of a midnight-crossing block, and the block's start when the block no longer covers it. Issued occurrences of a series are fitted the same way. A carried task's reminder goes with it and rings again. Reminders written before this rule are left alone until something moves their task. |
+| 40 | A day before today, in the user's time zone, is closed to change. Nothing is created or moved onto it: `POST /blocks`, `POST /tasks`, `POST /tasks/{id}/move` and a block edit's `newDate` refuse an earlier date with `422 DATE_IN_PAST`. What already sits on it can only be moved off it (to today or later), deleted, or, for a task, ticked and un-ticked (`/done` is unchanged, carry-forward included). Any other edit is `422 DAY_CLOSED`: a task `PATCH` that would change anything, a block occurrence `PATCH` without a `newDate`, with `name`, `alert` or `recurrence`, or with `thisAndFuture` on a repeating block (only the occurrence itself moves; new hours may come with the move), and skip or un-skip. Decisions 26, 28 and 30's carrying of tasks moved onto a closed day no longer arises. The app hides those affordances on past days and its date pickers start at today. |
 
 ## 11. Error codes to add
 
@@ -799,6 +793,8 @@ Append these to `src/core/http/error-code.ts`:
 | `BLOCK_NO_OCCURRENCE` | 422 | A repeating block whose `until` comes before the first day its rule lands on. **Added** (`POST /blocks`, decision 20). |
 | `REPEAT_NOT_ALLOWED` | 422 | `repeatWithBlock` on a general-list task or with a block that doesn't repeat, or `recurrence` on a task in a block. **Added** (`POST /tasks`). |
 | `REMINDER_OUT_OF_RANGE` | 422 | A task's `reminderAt` on another day than the task's, or outside the block occurrence it sits in (decision 39). **Added** (`POST /tasks`, `PATCH /tasks/{id}`). |
+| `DATE_IN_PAST` | 422 | A block or task created or moved onto a day before the user's today (decision 40). **Added** (`POST /blocks`, `POST /tasks`, `POST /tasks/{id}/move`, `PATCH /blocks/{seriesId}/occurrences/{date}`). |
+| `DAY_CLOSED` | 422 | An edit, other than a move off it, a delete or a tick, to a block or task on a day before the user's today (decision 40). **Added** (`PATCH /tasks/{id}`, `PATCH`, `POST …/skip` and `DELETE …/skip` on `/blocks/{seriesId}/occurrences/{date}`). |
 | `BLOCK_NOT_ON_DATE` | 422 | A task put in a block on a date the block doesn't fall on. **Added** (`POST /tasks`). |
 | `ID_TOKEN_INVALID` | 401 | A Google or Apple ID token with a bad signature, another app's audience, the wrong issuer, an expired `exp`, or an unverified email; or an Apple authorization code Apple refuses. **Added** (`POST /auth/google`, `POST /auth/apple`). |
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | A retried create whose original request hasn't finished yet. **Not needed so far:** a create that inserts in one statement never exposes an unfinished original (decision 19). Add it only for a create that holds its insert open inside a longer transaction. |
